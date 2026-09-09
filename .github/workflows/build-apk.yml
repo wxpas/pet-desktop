@@ -50,35 +50,63 @@ jobs:
             libffi-dev \
             libssl-dev \
             automake \
-            libltdl-dev
+            libltdl-dev \
+            patch
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install cython==0.29.36
-          pip install buildozer
+          pip install buildozer python-for-android
 
-      - name: Cache buildozer dependencies
+      - name: Cache buildozer and packages
         uses: actions/cache@v4
         with:
           path: |
             ~/.buildozer
             ~/.cache/buildozer
-          key: buildozer-v3-${{ hashFiles('buildozer.spec') }}
+            ~/.local/share/python-for-android
+          key: p4a-v4-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            p4a-v4-
 
-      - name: Build APK (Debug)
+      - name: Accept SDK licenses
+        run: |
+          yes | sdkmanager --licenses 2>/dev/null || true
+          echo "SDK licenses accepted"
+
+      - name: Build APK (Debug) with retries
         run: |
           echo "Starting APK build..."
-          set -o pipefail
-          yes | buildozer android debug 2>&1 | tee build.log | tail -300
-          EXIT_CODE=${PIPESTATUS[0]}
-          echo "Build finished with exit code: $EXIT_CODE"
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "=== Build failed! Last 200 lines ==="
-            tail -200 build.log
-          fi
-          exit $EXIT_CODE
-        timeout-minutes: 90
+          set +e
+          MAX_RETRIES=3
+          RETRY=0
+          while [ $RETRY -lt $MAX_RETRIES ]; do
+            echo "=== Build attempt $((RETRY+1))/$MAX_RETRIES ==="
+            yes | buildozer android debug 2>&1 | tee build.log
+            EXIT_CODE=${PIPESTATUS[0]}
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "Build successful!"
+              exit 0
+            fi
+            RETRY=$((RETRY+1))
+            if [ $RETRY -lt $MAX_RETRIES ]; then
+              echo "Build failed (exit code $EXIT_CODE), retrying in 30 seconds..."
+              tail -30 build.log
+              sleep 30
+            fi
+          done
+          echo "Build failed after $MAX_RETRIES attempts"
+          echo "=== Last 200 lines of final build log ==="
+          tail -200 build.log
+          exit 1
+        timeout-minutes: 120
+
+      - name: Find APK files
+        run: |
+          echo "Looking for APK files..."
+          find bin/ -name "*.apk" -type f 2>/dev/null || echo "No APK found in bin/"
+          ls -la bin/ 2>/dev/null || echo "bin/ directory not found"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
