@@ -50,7 +50,16 @@ source.exclude_patterns =
     sprite_preview_all.png,
     sprite_sheet_*.png,
     sprite_sheet_raw.png,
-    cockroach_pet.py
+    cockroach_pet.py,
+    宠物控制台.py,
+    代码结构分析报告.md,
+    使用说明.md,
+    APK打包说明.md,
+    build_apk_colab.ipynb,
+    *.bat,
+    *.vbs,
+    .github,
+    pet_apk_build.zip
 
 # ---------- 版本信息 ----------
 
