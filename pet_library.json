@@ -1,0 +1,105 @@
+{
+  "pets": {
+    "cockroach": {
+      "name": "蟑螂小强",
+      "sheet": "sprite_sheet_raw.png",
+      "unlock": 0,
+      "skins": [
+        {"id": "default", "name": "经典棕", "hue": 0, "sat": 1.0, "val": 1.0},
+        {"id": "gold", "name": "荣耀金", "hue": 10, "sat": 1.08, "val": 1.05},
+        {"id": "mint", "name": "薄荷绿", "hue": 100, "sat": 1.0, "val": 0.92},
+        {"id": "night", "name": "暗夜紫", "hue": -55, "sat": 1.1, "val": 0.85},
+        {"id": "legend", "name": "传说幻彩", "hue": 0, "sat": 1.1, "val": 1.05, "rainbow": true}
+      ]
+    },
+    "cat": {
+      "name": "橘猫",
+      "sheet": "sprite_sheet_cat.png",
+      "unlock": 0,
+      "skins": [
+        {"id": "default", "name": "经典橘", "hue": 0, "sat": 1.0, "val": 1.0},
+        {"id": "gold", "name": "荣耀金", "hue": 10, "sat": 1.08, "val": 1.05},
+        {"id": "cream", "name": "奶油白", "hue": 18, "sat": 0.35, "val": 1.12},
+        {"id": "mist", "name": "雾灰蓝", "hue": 145, "sat": 0.45, "val": 0.95},
+        {"id": "caramel", "name": "焦糖", "hue": -8, "sat": 1.0, "val": 0.88},
+        {"id": "legend", "name": "传说幻彩", "hue": 0, "sat": 1.1, "val": 1.05, "rainbow": true}
+      ]
+    },
+    "dog": {
+      "name": "柴犬",
+      "sheet": "sprite_sheet_dog.png",
+      "unlock": 0,
+      "skins": [
+        {"id": "default", "name": "经典黄", "hue": 0, "sat": 1.0, "val": 1.0},
+        {"id": "gold", "name": "荣耀金", "hue": 10, "sat": 1.08, "val": 1.05},
+        {"id": "cream", "name": "奶白", "hue": 15, "sat": 0.3, "val": 1.15},
+        {"id": "mocha", "name": "摩卡深咖", "hue": -5, "sat": 1.0, "val": 0.72},
+        {"id": "matcha", "name": "抹茶绿", "hue": 80, "sat": 0.9, "val": 0.95},
+        {"id": "legend", "name": "传说幻彩", "hue": 0, "sat": 1.1, "val": 1.05, "rainbow": true}
+      ]
+    },
+    "rabbit": {
+      "name": "小白兔",
+      "sheet": "sprite_sheet_rabbit.png",
+      "unlock": 0,
+      "skins": [
+        {"id": "default", "name": "雪白粉耳", "hue": 0, "sat": 1.0, "val": 1.0},
+        {"id": "gold", "name": "荣耀金", "hue": 10, "sat": 1.08, "val": 1.05},
+        {"id": "lavender", "name": "薰衣草紫", "hue": 45, "sat": 0.6, "val": 0.98},
+        {"id": "peach", "name": "蜜桃粉", "hue": -12, "sat": 0.9, "val": 1.05},
+        {"id": "mint", "name": "薄荷绿", "hue": 80, "sat": 0.7, "val": 0.98},
+        {"id": "legend", "name": "传说幻彩", "hue": 0, "sat": 1.1, "val": 1.05, "rainbow": true}
+      ]
+    },
+    "hamster": {
+      "name": "团子仓鼠",
+      "sheet": "sprite_sheet_hamster.png",
+      "unlock": 600,
+      "skins": [
+        {"id": "default", "name": "金黄团子", "hue": 0, "sat": 1.0, "val": 1.0},
+        {"id": "gold", "name": "荣耀金", "hue": 10, "sat": 1.08, "val": 1.05},
+        {"id": "cream", "name": "奶油白", "hue": 20, "sat": 0.3, "val": 1.12},
+        {"id": "strawberry", "name": "草莓粉", "hue": -8, "sat": 0.85, "val": 1.0},
+        {"id": "legend", "name": "传说幻彩", "hue": 0, "sat": 1.1, "val": 1.05, "rainbow": true}
+      ]
+    },
+    "corgi": {
+      "name": "短腿柯基",
+      "sheet": "sprite_sheet_corgi.png",
+      "unlock": 1200,
+      "achieve": "collect_15",
+      "skins": [
+        {"id": "default", "name": "经典黄白", "hue": 0, "sat": 1.0, "val": 1.0},
+        {"id": "gold", "name": "荣耀金", "hue": 10, "sat": 1.08, "val": 1.05},
+        {"id": "sable", "name": "黑貂棕", "hue": -12, "sat": 1.0, "val": 0.78},
+        {"id": "tricolor", "name": "三色花", "hue": 30, "sat": 0.7, "val": 0.95},
+        {"id": "legend", "name": "传说幻彩", "hue": 0, "sat": 1.1, "val": 1.05, "rainbow": true}
+      ]
+    },
+    "penguin": {
+      "name": "摇摇企鹅",
+      "sheet": "sprite_sheet_penguin.png",
+      "unlock": 800,
+      "skins": [
+        {"id": "default", "name": "经典蓝白", "hue": 0, "sat": 1.0, "val": 1.0},
+        {"id": "gold", "name": "荣耀金", "hue": 10, "sat": 1.08, "val": 1.05},
+        {"id": "ice", "name": "冰川蓝", "hue": 145, "sat": 0.5, "val": 1.05},
+        {"id": "emperor", "name": "帝企鹅金黑", "hue": 30, "sat": 0.8, "val": 0.85},
+        {"id": "legend", "name": "传说幻彩", "hue": 0, "sat": 1.1, "val": 1.05, "rainbow": true}
+      ]
+    },
+    "panda": {
+      "name": "滚滚熊猫",
+      "sheet": "sprite_sheet_panda.png",
+      "unlock": 1500,
+      "achieve": "collect_15",
+      "skins": [
+        {"id": "default", "name": "经典黑白", "hue": 0, "sat": 1.0, "val": 1.0},
+        {"id": "gold", "name": "荣耀金", "hue": 10, "sat": 1.08, "val": 1.05},
+        {"id": "bamboo", "name": "竹青", "hue": 65, "sat": 0.8, "val": 0.95},
+        {"id": "candy", "name": "糖果粉", "hue": -10, "sat": 0.8, "val": 1.05},
+        {"id": "legend", "name": "传说幻彩", "hue": 0, "sat": 1.1, "val": 1.05, "rainbow": true}
+      ]
+    }
+  }
+}

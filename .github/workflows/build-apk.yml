@@ -1,0 +1,101 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # 支持手动触发
+
+env:
+  APP_NAME: 电子宠物
+  PACKAGE_NAME: org.pet.desktop
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            zip \
+            unzip \
+            autoconf \
+            libtool \
+            pkg-config \
+            zlib1g-dev \
+            libncurses5-dev \
+            libncursesw5-dev \
+            libtinfo5 \
+            cmake \
+            libffi-dev \
+            libssl-dev \
+            automake \
+            libltdl-dev
+          echo "System dependencies installed"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install cython==0.29.36
+          pip install buildozer
+          echo "Python dependencies installed"
+
+      - name: Cache buildozer dependencies
+        uses: actions/cache@v4
+        id: buildozer-cache
+        with:
+          path: |
+            ~/.buildozer
+            ~/.cache/buildozer
+          key: ${{ runner.os }}-buildozer-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            ${{ runner.os }}-buildozer-
+
+      - name: Build APK (Debug)
+        run: |
+          echo "Starting APK build..."
+          buildozer android debug 2>&1 | tail -200
+          echo "Build completed"
+        timeout-minutes: 60
+
+      - name: Find APK files
+        run: |
+          echo "Looking for APK files..."
+          find bin/ -name "*.apk" -type f 2>/dev/null || echo "No APK found in bin/"
+          ls -la bin/ 2>/dev/null || echo "bin/ directory not found"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pet-app-debug-apk
+          path: bin/*.apk
+          if-no-files-found: error
+
+      - name: Create Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/*.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

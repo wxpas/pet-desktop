@@ -1,0 +1,8 @@
+{
+  "pet": "rabbit",
+  "skin": "mint",
+  "second_pet": {
+    "pet": "cat",
+    "skin": "default"
+  }
+}
