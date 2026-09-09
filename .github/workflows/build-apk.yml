@@ -44,53 +44,145 @@ jobs:
           python -m pip install --upgrade pip
           pip install cython==0.29.36 buildozer python-for-android
 
-      - name: Cache buildozer
+      - name: Cache buildozer and packages
         uses: actions/cache@v4
         with:
           path: |
             ~/.buildozer
             ~/.cache/buildozer
             ~/.local/share/python-for-android
-          key: p4a-v5-${{ hashFiles('buildozer.spec') }}
+          key: p4a-v6-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
+            p4a-v6-
             p4a-v5-
 
-      - name: Pre-download Python source
+      - name: Pre-download p4a dependencies
         run: |
-          # 预下载 Python 源码到 p4a 缓存目录，避免 502 错误
           P4A_PACKAGES=~/.local/share/python-for-android/packages
           mkdir -p "$P4A_PACKAGES"
           
-          # 尝试多个下载源
-          PYTHON_VERSION="3.10.15"
-          FILENAME="Python-${PYTHON_VERSION}.tgz"
+          download_file() {
+            local url="$1"
+            local filename="$2"
+            local dest="$P4A_PACKAGES/$filename"
+            if [ -f "$dest" ]; then
+              echo "Already cached: $filename"
+              return 0
+            fi
+            echo "Downloading: $filename"
+            for i in 1 2 3 4 5; do
+              if wget -q --timeout=120 --tries=3 -O "$dest" "$url"; then
+                echo "  Success ($(du -h "$dest" | cut -f1))"
+                return 0
+              fi
+              echo "  Attempt $i failed, retrying..."
+              sleep 5
+            done
+            echo "  FAILED: $filename"
+            rm -f "$dest"
+            return 1
+          }
           
-          if [ ! -f "$P4A_PACKAGES/$FILENAME" ]; then
-            echo "Downloading Python $PYTHON_VERSION..."
-            # 尝试多个镜像
-            for URL in \
-              "https://www.python.org/ftp/python/${PYTHON_VERSION}/${FILENAME}" \
-              "https://www.python.org/ftp/python/3.10.13/Python-3.10.13.tgz" \
-              "https://mirrors.huaweicloud.com/python/${PYTHON_VERSION}/${FILENAME}"; do
-              echo "Trying: $URL"
-              if wget -q --timeout=60 -O "$P4A_PACKAGES/$FILENAME" "$URL"; then
-                echo "Download successful from $URL"
-                ls -lh "$P4A_PACKAGES/$FILENAME"
+          # Python 源码 (多个镜像)
+          PY_VER="3.10.13"
+          PY_FILE="Python-${PY_VER}.tgz"
+          if [ ! -f "$P4A_PACKAGES/$PY_FILE" ]; then
+            for url in \
+              "https://www.python.org/ftp/python/${PY_VER}/${PY_FILE}" \
+              "https://mirrors.huaweicloud.com/python/${PY_VER}/${PY_FILE}" \
+              "https://mirrors.hit.edu.cn/python/${PY_VER}/${PY_FILE}"; do
+              if wget -q --timeout=120 --tries=2 -O "$P4A_PACKAGES/$PY_FILE" "$url"; then
+                echo "Python $PY_VER downloaded from $url"
+                ls -lh "$P4A_PACKAGES/$PY_FILE"
                 break
               fi
-              echo "Failed, trying next..."
             done
-          else
-            echo "Python source already cached"
           fi
           
-          echo "Python source ready"
+          # FreeType (savannah 不稳定，用镜像)
+          FT_VER="2.14.1"
+          FT_FILE="freetype-${FT_VER}.tar.gz"
+          if [ ! -f "$P4A_PACKAGES/$FT_FILE" ]; then
+            for url in \
+              "https://download.savannah.gnu.org/releases/freetype/${FT_FILE}" \
+              "https://download-mirror.savannah.gnu.org/releases/freetype/${FT_FILE}" \
+              "https://mirror.csclub.uwaterloo.ca/nongnu/freetype/${FT_FILE}"; do
+              if wget -q --timeout=120 --tries=2 -O "$P4A_PACKAGES/$FT_FILE" "$url"; then
+                echo "freetype $FT_VER downloaded from $url"
+                ls -lh "$P4A_PACKAGES/$FT_FILE"
+                break
+              fi
+            done
+          fi
+          
+          # libffi
+          download_file "https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz" "libffi-3.4.6.tar.gz" || true
+          
+          # OpenSSL
+          download_file "https://www.openssl.org/source/openssl-1.1.1w.tar.gz" "openssl-1.1.1w.tar.gz" || true
+          
+          # SDL2
+          download_file "https://github.com/libsdl-org/SDL/releases/download/release-2.30.8/SDL2-2.30.8.tar.gz" "SDL2-2.30.8.tar.gz" || true
+          
+          # SDL2_image
+          download_file "https://github.com/libsdl-org/SDL_image/releases/download/release-2.8.2/SDL2_image-2.8.2.tar.gz" "SDL2_image-2.8.2.tar.gz" || true
+          
+          # SDL2_ttf
+          download_file "https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.22.0/SDL2_ttf-2.22.0.tar.gz" "SDL2_ttf-2.22.0.tar.gz" || true
+          
+          # SDL2_mixer
+          download_file "https://github.com/libsdl-org/SDL_mixer/releases/download/release-2.8.0/SDL2_mixer-2.8.0.tar.gz" "SDL2_mixer-2.8.0.tar.gz" || true
+          
+          # Pillow
+          download_file "https://github.com/python-pillow/Pillow/archive/refs/tags/10.4.0.tar.gz" "pillow-10.4.0.tar.gz" || true
+          
+          # Kivy
+          download_file "https://github.com/kivy/kivy/archive/refs/tags/2.3.1.tar.gz" "kivy-2.3.1.tar.gz" || true
+          
+          echo ""
+          echo "=== Downloaded packages ==="
+          ls -lh "$P4A_PACKAGES/" 2>/dev/null || echo "No packages"
+          echo "Done pre-downloading"
 
-      - name: Build APK (Debug)
+      - name: Build APK (Debug) with retries
         run: |
           echo "Starting APK build..."
-          yes | buildozer android debug
-        timeout-minutes: 90
+          MAX_RETRIES=3
+          RETRY=0
+          
+          while [ $RETRY -lt $MAX_RETRIES ]; do
+            echo ""
+            echo "=========================================="
+            echo "Build attempt $((RETRY+1))/$MAX_RETRIES"
+            echo "=========================================="
+            
+            yes | buildozer android debug 2>&1 | tee build_$RETRY.log
+            EXIT_CODE=${PIPESTATUS[0]}
+            
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo ""
+              echo "BUILD SUCCESS!"
+              ls -lh bin/*.apk
+              exit 0
+            fi
+            
+            RETRY=$((RETRY+1))
+            
+            if [ $RETRY -lt $MAX_RETRIES ]; then
+              echo "Build attempt $RETRY failed (exit code $EXIT_CODE)"
+              echo "Last 30 lines:"
+              tail -30 build_$((RETRY-1)).log
+              echo "Retrying in 60 seconds..."
+              sleep 60
+            fi
+          done
+          
+          echo ""
+          echo "BUILD FAILED after $MAX_RETRIES attempts"
+          echo "Last 150 lines of final log:"
+          tail -150 build_$((MAX_RETRIES-1)).log
+          exit 1
+        timeout-minutes: 180
 
       - name: Verify APK
         run: |
@@ -105,8 +197,6 @@ jobs:
             done
           else
             echo "=== FAILED: No APK generated ==="
-            echo "Last 100 lines of buildozer output:"
-            find .buildozer -name "*.log" -type f 2>/dev/null | head -3
             exit 1
           fi
 
@@ -117,12 +207,10 @@ jobs:
           name: pet-app-debug-apk
           path: bin/*.apk
 
-      - name: Upload buildozer logs on failure
+      - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: buildozer-logs
-          path: |
-            .buildozer/**/*.log
-            build.log
+          name: build-logs
+          path: build_*.log
           if-no-files-found: ignore
