@@ -69,7 +69,7 @@ version = 1.0
 # ---------- 需求与依赖 ----------
 
 # Python 版本要求
-requirements = python3==3.10.12, kivy==2.3.1, pillow
+requirements = python3, kivy==2.3.1, pillow
 
 # 额外的 Python 包索引（可选）
 # pypi = https://pypi.org/simple/
@@ -98,7 +98,7 @@ android.ndk = 25b
 
 # 支持的 CPU 架构
 # 可选：armeabi-v7a, arm64-v8a, x86, x86_64
-android.arch = armeabi-v7a, arm64-v8a
+android.archs = armeabi-v7a, arm64-v8a
 
 # 应用权限
 # INTERNET：网络权限（可选，预留未来功能）
