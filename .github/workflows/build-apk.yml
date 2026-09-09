@@ -35,90 +35,94 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
-            git \
-            zip \
-            unzip \
-            autoconf \
-            libtool \
-            pkg-config \
-            zlib1g-dev \
-            libncurses5-dev \
-            libncursesw5-dev \
-            libtinfo5 \
-            cmake \
-            libffi-dev \
-            libssl-dev \
-            automake \
-            libltdl-dev \
-            patch
+            build-essential git zip unzip autoconf libtool \
+            pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev \
+            libtinfo5 cmake libffi-dev libssl-dev automake libltdl-dev patch wget
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install cython==0.29.36
-          pip install buildozer python-for-android
+          pip install cython==0.29.36 buildozer python-for-android
 
-      - name: Cache buildozer and packages
+      - name: Cache buildozer
         uses: actions/cache@v4
         with:
           path: |
             ~/.buildozer
             ~/.cache/buildozer
             ~/.local/share/python-for-android
-          key: p4a-v4-${{ hashFiles('buildozer.spec') }}
+          key: p4a-v5-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
-            p4a-v4-
+            p4a-v5-
 
-      - name: Accept SDK licenses
+      - name: Pre-download Python source
         run: |
-          yes | sdkmanager --licenses 2>/dev/null || true
-          echo "SDK licenses accepted"
+          # 预下载 Python 源码到 p4a 缓存目录，避免 502 错误
+          P4A_PACKAGES=~/.local/share/python-for-android/packages
+          mkdir -p "$P4A_PACKAGES"
+          
+          # 尝试多个下载源
+          PYTHON_VERSION="3.10.15"
+          FILENAME="Python-${PYTHON_VERSION}.tgz"
+          
+          if [ ! -f "$P4A_PACKAGES/$FILENAME" ]; then
+            echo "Downloading Python $PYTHON_VERSION..."
+            # 尝试多个镜像
+            for URL in \
+              "https://www.python.org/ftp/python/${PYTHON_VERSION}/${FILENAME}" \
+              "https://www.python.org/ftp/python/3.10.13/Python-3.10.13.tgz" \
+              "https://mirrors.huaweicloud.com/python/${PYTHON_VERSION}/${FILENAME}"; do
+              echo "Trying: $URL"
+              if wget -q --timeout=60 -O "$P4A_PACKAGES/$FILENAME" "$URL"; then
+                echo "Download successful from $URL"
+                ls -lh "$P4A_PACKAGES/$FILENAME"
+                break
+              fi
+              echo "Failed, trying next..."
+            done
+          else
+            echo "Python source already cached"
+          fi
+          
+          echo "Python source ready"
 
-      - name: Build APK (Debug) with retries
+      - name: Build APK (Debug)
         run: |
           echo "Starting APK build..."
-          set +e
-          MAX_RETRIES=3
-          RETRY=0
-          while [ $RETRY -lt $MAX_RETRIES ]; do
-            echo "=== Build attempt $((RETRY+1))/$MAX_RETRIES ==="
-            yes | buildozer android debug 2>&1 | tee build.log
-            EXIT_CODE=${PIPESTATUS[0]}
-            if [ $EXIT_CODE -eq 0 ]; then
-              echo "Build successful!"
-              exit 0
-            fi
-            RETRY=$((RETRY+1))
-            if [ $RETRY -lt $MAX_RETRIES ]; then
-              echo "Build failed (exit code $EXIT_CODE), retrying in 30 seconds..."
-              tail -30 build.log
-              sleep 30
-            fi
-          done
-          echo "Build failed after $MAX_RETRIES attempts"
-          echo "=== Last 200 lines of final build log ==="
-          tail -200 build.log
-          exit 1
-        timeout-minutes: 120
+          yes | buildozer android debug
+        timeout-minutes: 90
 
-      - name: Find APK files
+      - name: Verify APK
         run: |
-          echo "Looking for APK files..."
-          find bin/ -name "*.apk" -type f 2>/dev/null || echo "No APK found in bin/"
-          ls -la bin/ 2>/dev/null || echo "bin/ directory not found"
+          echo "=== Build output ==="
+          ls -la bin/ 2>/dev/null || echo "bin/ not found"
+          find bin/ -name "*.apk" -type f 2>/dev/null || echo "No APK found"
+          
+          if [ -n "$(find bin/ -name '*.apk' -type f 2>/dev/null)" ]; then
+            echo "=== SUCCESS: APK found! ==="
+            for apk in bin/*.apk; do
+              echo "  $apk ($(du -h $apk | cut -f1))"
+            done
+          else
+            echo "=== FAILED: No APK generated ==="
+            echo "Last 100 lines of buildozer output:"
+            find .buildozer -name "*.log" -type f 2>/dev/null | head -3
+            exit 1
+          fi
 
       - name: Upload APK artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: pet-app-debug-apk
           path: bin/*.apk
-          if-no-files-found: error
 
-      - name: Upload build log (on failure)
+      - name: Upload buildozer logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: build.log
+          name: buildozer-logs
+          path: |
+            .buildozer/**/*.log
+            build.log
           if-no-files-found: ignore
