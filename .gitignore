@@ -52,6 +52,7 @@ build_log*.txt
 build*_log.txt
 build_log*_extracted/
 *_extracted/
+_debug_archive/
 *.zip
 
 # WorkBuddy 工作区数据

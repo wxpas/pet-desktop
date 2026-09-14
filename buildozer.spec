@@ -76,6 +76,7 @@ source.exclude_patterns =
     _*.ps1,
     _*.txt,
     _*.spec,
+    _debug_archive,
     *.bak,
     p4a_recipes,
     .workbuddy
