@@ -12,6 +12,8 @@ on:
 env:
   APP_NAME: PetDesktop
   PACKAGE_NAME: org.pet.desktop
+  # freetype 必须与 p4a 内置 recipe 的 version 一致，否则源码对不上
+  FREETYPE_VERSION: '2.14.1'
 
 jobs:
   build-apk:
@@ -37,7 +39,7 @@ jobs:
           sudo apt-get install -y \
             build-essential git zip unzip autoconf libtool \
             pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev \
-            libtinfo5 cmake libffi-dev libssl-dev automake libltdl-dev patch wget
+            libtinfo5 cmake libffi-dev libssl-dev automake libltdl-dev patch wget curl
 
       - name: Install Python dependencies
         run: |
@@ -51,149 +53,143 @@ jobs:
             ~/.buildozer
             ~/.cache/buildozer
             ~/.local/share/python-for-android
-          key: p4a-v6-${{ hashFiles('buildozer.spec') }}
+          key: p4a-v7-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
+            p4a-v7-
             p4a-v6-
-            p4a-v5-
 
-      - name: Pre-download p4a dependencies
+      # ---------------------------------------------------------------
+      # 核心修复：p4a 内置的 freetype recipe 从 download.savannah.gnu.org
+      # 拉源码，该地址在 CI 上稳定返回 502（重试 5 次全部失败），导致
+      # `p4a create` 直接挂掉。
+      #
+      # p4a 的 Recipe.download_if_necessary() / unpack() 都会读取
+      #     P4A_<recipe名小写>_DIR
+      # 一旦设置：跳过下载，并在 unpack 时把该目录 cp -a 到构建目录。
+      # 因此这里预先从可用镜像下载官方 release tarball（含预生成的
+      # ./configure，freetype recipe 是靠 autotools 构建的，git tag 源码包
+      # 没有 configure，不能用）并解压，然后把目录喂给 p4a。
+      # ---------------------------------------------------------------
+      - name: Stage freetype source (bypass savannah 502)
         run: |
-          P4A_PACKAGES=~/.local/share/python-for-android/packages
-          mkdir -p "$P4A_PACKAGES"
-          
-          download_file() {
-            local url="$1"
-            local filename="$2"
-            local dest="$P4A_PACKAGES/$filename"
-            if [ -f "$dest" ]; then
-              echo "Already cached: $filename"
-              return 0
+          set -euo pipefail
+          FT_FILE="freetype-${FREETYPE_VERSION}.tar.gz"
+          SRC="$RUNNER_TEMP/freetype-src"
+          TGZ="$RUNNER_TEMP/$FT_FILE"
+          rm -rf "$SRC" "$TGZ"
+          mkdir -p "$SRC"
+
+          MIRRORS=(
+            "https://download-mirror.savannah.gnu.org/releases/freetype/$FT_FILE"
+            "https://mirror.csclub.uwaterloo.ca/nongnu/freetype/$FT_FILE"
+            "https://downloads.sourceforge.net/project/freetype/freetype2/${FREETYPE_VERSION}/$FT_FILE"
+            "https://download.savannah.gnu.org/releases/freetype/$FT_FILE"
+          )
+
+          got=0
+          for u in "${MIRRORS[@]}"; do
+            echo "== trying $u"
+            if curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+                 --max-time 300 -o "$TGZ" "$u"; then
+              if tar tzf "$TGZ" >/dev/null 2>&1; then
+                echo "   OK: $(du -h "$TGZ" | cut -f1)"
+                got=1
+                break
+              fi
+              echo "   -> 下到的不是合法 gzip 包，换下一个镜像"
             fi
-            echo "Downloading: $filename"
-            for i in 1 2 3 4 5; do
-              if wget -q --timeout=120 --tries=3 -O "$dest" "$url"; then
-                echo "  Success ($(du -h "$dest" | cut -f1))"
-                return 0
-              fi
-              echo "  Attempt $i failed, retrying..."
-              sleep 5
-            done
-            echo "  FAILED: $filename"
-            rm -f "$dest"
-            return 1
-          }
-          
-          # Python 源码 (多个镜像)
-          PY_VER="3.10.13"
-          PY_FILE="Python-${PY_VER}.tgz"
-          if [ ! -f "$P4A_PACKAGES/$PY_FILE" ]; then
-            for url in \
-              "https://www.python.org/ftp/python/${PY_VER}/${PY_FILE}" \
-              "https://mirrors.huaweicloud.com/python/${PY_VER}/${PY_FILE}" \
-              "https://mirrors.hit.edu.cn/python/${PY_VER}/${PY_FILE}"; do
-              if wget -q --timeout=120 --tries=2 -O "$P4A_PACKAGES/$PY_FILE" "$url"; then
-                echo "Python $PY_VER downloaded from $url"
-                ls -lh "$P4A_PACKAGES/$PY_FILE"
-                break
-              fi
-            done
+          done
+
+          if [ "$got" != 1 ]; then
+            echo "::error::无法获取 freetype 源码，所有镜像均失败"
+            exit 1
           fi
-          
-          # FreeType (savannah 不稳定，用镜像)
-          FT_VER="2.14.1"
-          FT_FILE="freetype-${FT_VER}.tar.gz"
-          if [ ! -f "$P4A_PACKAGES/$FT_FILE" ]; then
-            for url in \
-              "https://download.savannah.gnu.org/releases/freetype/${FT_FILE}" \
-              "https://download-mirror.savannah.gnu.org/releases/freetype/${FT_FILE}" \
-              "https://mirror.csclub.uwaterloo.ca/nongnu/freetype/${FT_FILE}"; do
-              if wget -q --timeout=120 --tries=2 -O "$P4A_PACKAGES/$FT_FILE" "$url"; then
-                echo "freetype $FT_VER downloaded from $url"
-                ls -lh "$P4A_PACKAGES/$FT_FILE"
-                break
-              fi
-            done
+
+          tar xzf "$TGZ" -C "$SRC" --strip-components=1
+          if [ ! -f "$SRC/configure" ]; then
+            echo "::error::解压后的 freetype 目录缺少 ./configure"
+            exit 1
           fi
-          
-          # libffi
-          download_file "https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz" "libffi-3.4.6.tar.gz" || true
-          
-          # OpenSSL
-          download_file "https://www.openssl.org/source/openssl-1.1.1w.tar.gz" "openssl-1.1.1w.tar.gz" || true
-          
-          # SDL2
-          download_file "https://github.com/libsdl-org/SDL/releases/download/release-2.30.8/SDL2-2.30.8.tar.gz" "SDL2-2.30.8.tar.gz" || true
-          
-          # SDL2_image
-          download_file "https://github.com/libsdl-org/SDL_image/releases/download/release-2.8.2/SDL2_image-2.8.2.tar.gz" "SDL2_image-2.8.2.tar.gz" || true
-          
-          # SDL2_ttf
-          download_file "https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.22.0/SDL2_ttf-2.22.0.tar.gz" "SDL2_ttf-2.22.0.tar.gz" || true
-          
-          # SDL2_mixer
-          download_file "https://github.com/libsdl-org/SDL_mixer/releases/download/release-2.8.0/SDL2_mixer-2.8.0.tar.gz" "SDL2_mixer-2.8.0.tar.gz" || true
-          
-          # Pillow
-          download_file "https://github.com/python-pillow/Pillow/archive/refs/tags/10.4.0.tar.gz" "pillow-10.4.0.tar.gz" || true
-          
-          # Kivy
-          download_file "https://github.com/kivy/kivy/archive/refs/tags/2.3.1.tar.gz" "kivy-2.3.1.tar.gz" || true
-          
-          echo ""
-          echo "=== Downloaded packages ==="
-          ls -lh "$P4A_PACKAGES/" 2>/dev/null || echo "No packages"
-          echo "Done pre-downloading"
+          chmod +x "$SRC/configure"
+
+          # p4a 读的是小写名（recipe.py: environ.get('P4A_{}_DIR'.format(self.name.lower()))），
+          # 大写形式一起设上，兼容不同 p4a 版本。
+          {
+            echo "P4A_freetype_DIR=$SRC"
+            echo "P4A_FREETYPE_DIR=$SRC"
+          } >> "$GITHUB_ENV"
+
+          echo "=== staged freetype @ $SRC ==="
+          ls "$SRC" | head -20
 
       - name: Build APK (Debug) with retries
         run: |
+          set -o pipefail
+          P4A_REPO=".buildozer/android/platform/python-for-android"
+
+          # 失败重试时的兜底：把 p4a 里已知不稳定的下载源改到镜像。
+          # 主修复是上面的 P4A_freetype_DIR，这里只是防止别的 recipe 也抽风。
+          patch_p4a_sources() {
+            if [ ! -d "$P4A_REPO/pythonforandroid/recipes" ]; then
+              echo "p4a 尚未克隆，跳过补丁"
+              return 0
+            fi
+            echo "=== 把 p4a 里的 savannah 源替换为镜像 ==="
+            grep -rl "download\.savannah\.gnu\.org" "$P4A_REPO/pythonforandroid/recipes" 2>/dev/null \
+              | while read -r f; do
+                  sed -i 's#https://download\.savannah\.gnu\.org/releases#https://download-mirror.savannah.gnu.org/releases#g' "$f"
+                  echo "  patched: $f"
+                done || true
+          }
+
           echo "Starting APK build..."
           MAX_RETRIES=3
           RETRY=0
-          
+
           while [ $RETRY -lt $MAX_RETRIES ]; do
             echo ""
             echo "=========================================="
             echo "Build attempt $((RETRY+1))/$MAX_RETRIES"
             echo "=========================================="
-            
-            yes | buildozer android debug 2>&1 | tee build_$RETRY.log
-            EXIT_CODE=${PIPESTATUS[0]}
-            
-            if [ $EXIT_CODE -eq 0 ]; then
-              echo ""
+
+            yes | buildozer android debug 2>&1 | tee "build_${RETRY}.log"
+            EXIT_CODE=${PIPESTATUS[1]}
+
+            if [ "$EXIT_CODE" -eq 0 ]; then
+              echo "=========================================="
               echo "BUILD SUCCESS!"
+              echo "=========================================="
               ls -lh bin/*.apk
               exit 0
             fi
-            
+
             RETRY=$((RETRY+1))
-            
+
             if [ $RETRY -lt $MAX_RETRIES ]; then
               echo "Build attempt $RETRY failed (exit code $EXIT_CODE)"
-              echo "Last 30 lines:"
-              tail -30 build_$((RETRY-1)).log
+              echo "Last 40 lines:"
+              tail -40 "build_$((RETRY-1)).log" || true
+              patch_p4a_sources
               echo "Retrying in 60 seconds..."
               sleep 60
             fi
           done
-          
-          echo ""
+
+          echo "=========================================="
           echo "BUILD FAILED after $MAX_RETRIES attempts"
-          echo "Last 150 lines of final log:"
-          tail -150 build_$((MAX_RETRIES-1)).log
+          echo "=========================================="
+          tail -200 "build_$((MAX_RETRIES-1)).log" || true
           exit 1
-        timeout-minutes: 180
+        timeout-minutes: 240
 
       - name: Verify APK
         run: |
           echo "=== Build output ==="
           ls -la bin/ 2>/dev/null || echo "bin/ not found"
-          find bin/ -name "*.apk" -type f 2>/dev/null || echo "No APK found"
-          
           if [ -n "$(find bin/ -name '*.apk' -type f 2>/dev/null)" ]; then
             echo "=== SUCCESS: APK found! ==="
             for apk in bin/*.apk; do
-              echo "  $apk ($(du -h $apk | cut -f1))"
+              echo "  $apk ($(du -h "$apk" | cut -f1))"
             done
           else
             echo "=== FAILED: No APK generated ==="
@@ -206,9 +202,10 @@ jobs:
         with:
           name: pet-app-debug-apk
           path: bin/*.apk
+          if-no-files-found: error
 
-      - name: Upload build logs on failure
-        if: failure()
+      - name: Upload build logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs

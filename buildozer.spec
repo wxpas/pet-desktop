@@ -32,7 +32,6 @@ source.include_patterns =
     sprites/**/**/*.png,
     pet_config.json,
     pet_library.json,
-    pet_state.json,
     pet_core/*.py
 
 # 需要排除的文件/目录（开发期文件不进 APK）
@@ -50,6 +49,8 @@ source.exclude_patterns =
     sprite_preview_all.png,
     sprite_sheet_*.png,
     sprite_sheet_raw.png,
+    # 桌面/网页预览用的降采样精灵图，APK 里用不到（省 ~16MB）
+    sprites_display,
     cockroach_pet.py,
     宠物控制台.py,
     代码结构分析报告.md,
@@ -59,7 +60,25 @@ source.exclude_patterns =
     *.bat,
     *.vbs,
     .github,
-    pet_apk_build.zip
+    pet_apk_build.zip,
+    # 本地构建/调试产物
+    dist,
+    .venv,
+    .pip-cache,
+    .buildozer,
+    bin,
+    *.log,
+    build_log*,
+    build_log*_extracted,
+    *_extracted,
+    _*.py,
+    _*.png,
+    _*.ps1,
+    _*.txt,
+    _*.spec,
+    *.bak,
+    p4a_recipes,
+    .workbuddy
 
 # ---------- 版本信息 ----------
 
@@ -69,6 +88,8 @@ version = 1.0
 # ---------- 需求与依赖 ----------
 
 # Python 版本要求
+# 不要钉死 python3 版本：p4a 的 python3 recipe 会按自己的默认版本拉源码，
+# 这里写死版本号只会让日志与实际不一致（曾写 python3==3.10.12 但实际构建 3.10.15）。
 requirements = python3, kivy==2.3.1, pillow
 
 # 额外的 Python 包索引（可选）
@@ -98,6 +119,7 @@ android.ndk = 25b
 
 # 支持的 CPU 架构
 # 可选：armeabi-v7a, arm64-v8a, x86, x86_64
+# 注意键名必须是 android.archs（旧写法 android.arch 会被 buildozer 忽略）
 android.archs = armeabi-v7a, arm64-v8a
 
 # 应用权限

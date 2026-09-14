@@ -224,6 +224,7 @@ ACHIEVEMENTS = {
     "coop_10":    ("并肩作战（联手讨伐10次）", 300),
     "pokedex_6":  ("宠物收藏家（解锁6种宠物）", 300),
     "pokedex_8":  ("宠物大师（解锁全部8种宠物）", 500),
+    "feed_7":     ("模范饲养员（连续7天喂食）", 300),
 }
 RECAST_COST = 30         # 重铸装备（洗主题）消耗精华
 FUSION_CD = 300000       # 合体技冷却（毫秒，5 分钟）
@@ -238,6 +239,13 @@ SPECIAL_REWARD = {       # 专属技能基础奖励（金币, 经验）；随星
     "spin":  (30, 15),
     "boost": (20, 10),
 }
+RANKS = ["青铜", "白银", "黄金", "铂金", "钻石", "大师", "传说"]
+RANK_WINS_NEED = 5       # 对战每胜 5 场升一段
+TRAVEL_CD = 1800000      # 旅行冷却（30 分钟）
+TRAVEL_SPOTS = [         # 出差旅行目的地（带回特产）
+    ("日本", "樱花寿司"), ("巴黎", "法棍面包"), ("香港", "黄金蛋挞"),
+    ("意大利", "玛格丽特披萨"), ("巴西", "现磨咖啡豆"), ("泰国", "芒果糯米饭"),
+]
 
 
 FRAMES = {
@@ -424,7 +432,8 @@ class CockroachPet:
             self.nickname, self.alpha, \
             self.collected, self.fortune, \
             self.essence, self.badge, self.inventory, self.weekly, \
-            self.no_feed_streak, self._no_feed_egg, \
+            self.no_feed_streak, self._no_feed_egg, self.feed_streak, \
+            self.rank_idx, self.rank_wins, self.feed_bonus, \
             self.fusion_count, self._midnight_day, \
             self.win_streak, self.best_streak, \
             self.coop_count, self.star_level, self.star_exp = self.load_state()
@@ -469,7 +478,16 @@ class CockroachPet:
         self._fusion_owner = None  # 结算伙伴
         self._fusion_done = False  # 合体结算标记
         self.no_feed_streak = getattr(self, "no_feed_streak", 0)
+        self.feed_streak = getattr(self, "feed_streak", 0)   # 连续喂食天数（模范饲养员）
+        self.feed_bonus = getattr(self, "feed_bonus", 0)     # 喂食里程碑已发奖励（3/5 天）
         self._no_feed_egg = getattr(self, "_no_feed_egg", False)
+        self.rank_idx = getattr(self, "rank_idx", 0)         # 对战段位 0=青铜
+        self.rank_wins = getattr(self, "rank_wins", 0)       # 段位内胜场
+        self.traveling = False                               # 出差旅行中
+        self.travel_cd = 0                                   # 旅行冷却
+        self.travel_end = 0                                  # 归程时间戳
+        self.travel_spot = ""
+        self.travel_item = ""
         self._check_day = date.today()
         self._last_feed_day = date.today()
         self._whack_game = None    # 打地鼠小游戏窗口
@@ -582,6 +600,8 @@ class CockroachPet:
         self.menu.add_command(label="必杀技：宠物风暴", command=self.use_ultimate)
         self.menu.add_command(label="专属技能：%s" % self.special_skill_name(),
                               command=self.special_skill)
+        self.menu.add_command(label="出差旅行（带特产回来）",
+                              command=self.travel_skill)
         self.menu.add_command(label="竞技场（对战）", command=self.arena_fight)
         self.menu.add_command(label="找同伴打架", command=self.pet_battle)
         self.menu.add_command(label="合体技：双子风暴", command=self.fusion_skill)
@@ -1309,6 +1329,9 @@ class CockroachPet:
                 ("相伴时长", "%d 小时 %d 分" % divmod(self.uptime_ms // 60000, 60)),
                 ("饿晕次数", "%d" % self.stats.get("faint", 0)),
                 ("连续不喂食", "%d 天" % self.no_feed_streak),
+                ("连续喂食", "%d 天" % self.feed_streak),
+                ("对战段位", "%s %d/%d" % (RANKS[self.rank_idx], self.rank_wins,
+                                          RANK_WINS_NEED)),
             ]),
         ]
         tk.Label(top, text="宠物属性面板", font=("Microsoft YaHei UI", 13, "bold"),
@@ -1638,7 +1661,8 @@ class CockroachPet:
             self.add_gold(gold)
             self.add_exp(exp)
             self.add_mood(5)
-            head = "竞技场胜利！金币+%d 经验+%d" % (gold, exp)
+            rank_msg = self._rank_win()
+            head = "竞技场胜利！金币+%d 经验+%d%s" % (gold, exp, rank_msg)
         else:
             exp = 5
             self.add_exp(exp)
@@ -1795,6 +1819,75 @@ class CockroachPet:
                 "rabbit": "飞踢弹跳", "hamster": "滚球撞击", "corgi": "旋风反击",
                 "penguin": "冰锋啄击", "panda": "泰山压顶"}.get(pid, "元气重击")
 
+    # —— 对战段位 ——
+    def _rank_win(self):
+        """对战胜利推进段位：每 5 胜升一段（青铜→传说）；返回提示串"""
+        self.rank_wins += 1
+        self.save_state()
+        if self.rank_wins >= RANK_WINS_NEED and self.rank_idx < len(RANKS) - 1:
+            self.rank_wins = 0
+            self.rank_idx += 1
+            bonus = 50 * (self.rank_idx + 1)
+            self.add_gold(bonus)
+            self.show_bubble("段位晋升：%s！升段奖励 +%d 金币" % (
+                RANKS[self.rank_idx], bonus), 3200)
+            self.save_state()
+            return "　【%s %d/%d】" % (RANKS[self.rank_idx], self.rank_wins,
+                                       RANK_WINS_NEED)
+        return "　【%s %d/%d】" % (RANKS[self.rank_idx], self.rank_wins,
+                                   RANK_WINS_NEED)
+
+    # —— 出差旅行 ——
+    def travel_skill(self):
+        """派宠物出差旅行：离开屏幕 1~3 分钟，带回目的地特产（金币+经验）"""
+        if self.traveling:
+            self.show_bubble("正在%s旅行中…%s" % (
+                self.travel_spot, self.travel_item), 1600)
+            return
+        if self.travel_cd > 0:
+            self.show_bubble("旅行冷却中（%d 分钟）" % (self.travel_cd // 60000), 1800)
+            return
+        if self._battle_t > 0 or self._battle_fight or self._fusion_t > 0 \
+                or self.adventuring or self.sleeping or self._follow_target is not None \
+                or self._fainted:
+            self.show_bubble("现在抽不开身…", 1600)
+            return
+        self.travel_cd = TRAVEL_CD
+        self.traveling = True
+        self.travel_spot, self.travel_item = random.choice(TRAVEL_SPOTS)
+        self.travel_end = time.time() + random.randint(60, 180)
+        mins = max(1, int((self.travel_end - time.time()) // 60))
+        self.show_bubble("出发去%s啦！带回%s～预计 %d 分后回来" % (
+            self.travel_spot, self.travel_item, mins), 3000)
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+
+    def _travel_back(self):
+        """旅行归来：回到屏幕随机边缘 + 特产结算"""
+        self.traveling = False
+        self.travel_spot, self.travel_item = self.travel_spot or "远方", \
+                                             self.travel_item or "伴手礼"
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.wm_attributes("-topmost", True)
+        except Exception:
+            pass
+        self.teleport()
+        gold = 80 + self.level * 5
+        exp = 40 + self.level * 3
+        self.add_gold(gold)
+        self.add_exp(exp)
+        self.add_mood(8)
+        self.state = "walk"
+        self.state_left = 0
+        self.speed = self.base_speed()
+        self.show_bubble("从%s旅行归来！带回%s，金币+%d 经验+%d" % (
+            self.travel_spot, self.travel_item, gold, exp), 3600)
+        self.save_state()
+
     def _fight_hit(self):
         """互殴一轮：交替出拳（发起方先手），25% 概率发动专属招式"""
         if not self._battle_fight or self._battle_other is None:
@@ -1810,8 +1903,9 @@ class CockroachPet:
             dmg *= 2
         use_skill = random.random() < 0.25
         if use_skill:
-            # 专属招式：额外 +80% 伤害，更长的受击闪光
-            dmg += max(1, int(dmg * 0.8))
+            # 专属招式：额外 +80% 伤害（随星级再 +10%/星，满星 ×1.4），更长的受击闪光
+            lv_mult = 1 + 0.1 * max(0, attacker.star_level - 1)
+            dmg += max(1, int(dmg * 0.8 * lv_mult))
             defender._battle_dmg_taken += dmg
             defender._fight_hurt = 600
             attacker._fight_punch = 500
@@ -1860,8 +1954,9 @@ class CockroachPet:
             return
         my_d, o_d = self._battle_dmg_taken, o._battle_dmg_taken
         if my_d < o_d:
-            gold = 20 + self.level * 2
-            exp = 10 + self.level * 2
+            lv_mult = 1 + 0.1 * max(0, self.star_level - 1)   # 星级加成对战奖励
+            gold = int((20 + self.level * 2) * lv_mult)
+            exp = int((10 + self.level * 2) * lv_mult)
             self.add_gold(gold)
             self.add_exp(exp)
             self.add_mood(5)
@@ -1869,11 +1964,12 @@ class CockroachPet:
             self.win_streak += 1
             self.best_streak = max(self.best_streak, self.win_streak)
             o.win_streak = 0
+            rank_msg = self._rank_win()
             if self.win_streak >= 3:
                 self.check_achievements("fighter_3")
-                self.show_bubble("赢了！金币+%d 经验+%d　【三连胜！格斗大师！】" % (gold, exp), 3200)
+                self.show_bubble("赢了！金币+%d 经验+%d%s　【三连胜！格斗大师！】" % (gold, exp, rank_msg), 3200)
             else:
-                self.show_bubble("赢了！金币+%d 经验+%d（连胜 %d）" % (gold, exp, self.win_streak), 2600)
+                self.show_bubble("赢了！金币+%d 经验+%d%s（连胜 %d）" % (gold, exp, rank_msg, self.win_streak), 2600)
             o.show_bubble("呜…输了…", 1800)
         elif my_d > o_d:
             exp = 5
@@ -3046,6 +3142,10 @@ class CockroachPet:
                                     "adv": 0, "boss": 0, "feed": 0, "interact": 0},
                 int(s.get("no_feed_streak", 0)),
                 bool(s.get("no_feed_egg", False)),
+                int(s.get("feed_streak", 0)),
+                int(s.get("rank_idx", 0)),
+                int(s.get("rank_wins", 0)),
+                int(s.get("feed_bonus", 0)),
                 int(s.get("fusion_count", 0)),
                 str(s.get("midnight_day", "")),
                 int(s.get("win_streak", 0)),
@@ -3081,6 +3181,10 @@ class CockroachPet:
                               "weekly": self.weekly,
                               "no_feed_streak": self.no_feed_streak,
                               "no_feed_egg": self._no_feed_egg,
+                              "feed_streak": self.feed_streak,
+                              "feed_bonus": self.feed_bonus,
+                              "rank_idx": self.rank_idx,
+                              "rank_wins": self.rank_wins,
                               "fusion_count": self.fusion_count,
                               "midnight_day": self._midnight_day,
                               "win_streak": self.win_streak,
@@ -3545,6 +3649,39 @@ class CockroachPet:
                             "【隐藏彩蛋】连续 7 天没喂也活得好好的！"
                             "「野外求生」成就 +100 金币", 3800)
                         self.save_state()
+                    # 隐藏彩蛋：连续 7 天喂食「模范饲养员」
+                    try:
+                        from datetime import timedelta
+                        if self._last_feed_day == today:
+                            self.feed_streak = max(1, self.feed_streak)
+                        elif self._last_feed_day == today - timedelta(days=1):
+                            self.feed_streak += 1
+                            if self.feed_streak >= 7 \
+                                    and "feed_7" not in self.achieves:
+                                self.check_achievements("feed_7")
+                                self.add_gold(120)
+                                self.show_bubble(
+                                    "【隐藏彩蛋】连续 7 天按时喂食！"
+                                    "「模范饲养员」成就 +120 金币", 3800)
+                                self.save_state()
+                        else:
+                            self.feed_streak = 0
+                    except Exception:
+                        pass
+                    # 喂食里程碑奖励：连续 5 天 +50 / 连续 3 天 +20（每天只发一次）
+                    try:
+                        if self.feed_streak >= 5 and self.feed_bonus < 5:
+                            self.feed_bonus = 5
+                            self.add_gold(50)
+                            self.show_bubble("连续喂食 5 天！饲养达人奖励 +50 金币", 2600)
+                            self.save_state()
+                        elif self.feed_streak >= 3 and self.feed_bonus < 3:
+                            self.feed_bonus = 3
+                            self.add_gold(20)
+                            self.show_bubble("连续喂食 3 天！贴心饲主奖励 +20 金币", 2600)
+                            self.save_state()
+                    except Exception:
+                        pass
                 # 周报：新的一周自动切换清零
                 self._week_timer += TICK_MS
                 if self._week_timer >= 30000:
@@ -3617,6 +3754,11 @@ class CockroachPet:
                 if self.special_cd > 0:
                     self.special_cd = max(0, self.special_cd - TICK_MS)
                 self._special_tick()
+                if self.travel_cd > 0:
+                    self.travel_cd = max(0, self.travel_cd - TICK_MS)
+                # 旅行归程检查
+                if self.traveling and time.time() >= self.travel_end:
+                    self._travel_back()
                 # 图鉴收集成就：每 5 秒检查一次解锁数量
                 self._pokedex_timer += TICK_MS
                 if self._pokedex_timer >= 5000:
@@ -3676,7 +3818,8 @@ class CockroachPet:
                 elif self._follow_target is not None:
                     self._follow_tick()          # 双宠跟随模式
                 else:
-                    self.move()
+                    if not self.traveling:
+                        self.move()              # 出差旅行中不移动
                 if not self.wrapping and self.state != "chase":
                     self.clamp_pos(self.bounds())
             self.apply_geometry()

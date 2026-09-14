@@ -40,6 +40,22 @@ desktop.ini
 venv/
 env/
 ENV/
+.venv/
+.pip-cache/
+
+# 本地调试脚本与截图（不进仓库）
+_*.py
+_*.png
+_*.ps1
+_*.txt
+build_log*.txt
+build*_log.txt
+build_log*_extracted/
+*_extracted/
+*.zip
+
+# WorkBuddy 工作区数据
+.workbuddy/
 
 # Colab 打包输出
 pet_apk_build.zip

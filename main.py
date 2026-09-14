@@ -22,12 +22,27 @@
 """
 import os
 import sys
+import json
 import random
 import time
 
 # ========== 平台检测（必须放在最前面）==========
 from kivy.utils import platform as kivy_platform
 IS_ANDROID = kivy_platform == 'android'
+
+# ========== Windows 高 DPI 感知（必须在 Kivy 建窗之前）==========
+if not IS_ANDROID:
+    try:
+        import ctypes as _ctypes
+        try:
+            _ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            try:
+                _ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 # ========== Kivy 配置（必须放在 import kivy.uix 之前）==========
 from kivy.config import Config
@@ -60,7 +75,7 @@ from kivy.uix.widget import Widget
 from kivy.clock import Clock
 from kivy.graphics import Color, Rectangle
 from kivy.core.text import LabelBase
-from kivy.metrics import dp
+from kivy.metrics import dp, Metrics
 
 # ========== 导入核心模块 ==========
 from pet_core.constants import FRAMES, TICK_MS, MOOD_DECAY_MS, \
@@ -69,7 +84,8 @@ from pet_core.constants import FRAMES, TICK_MS, MOOD_DECAY_MS, \
     SYNTH_COST, RECAST_COST
 from pet_core.utils import load_pet_config, load_pet_library, \
     pet_display_name, get_pet_lines, resolve_pet, resource_dir, \
-    get_unlocked_pets, save_pet_config, set_data_dir, IS_ANDROID as UTILS_IS_ANDROID
+    get_unlocked_pets, save_pet_config, set_data_dir, get_data_dir, \
+    IS_ANDROID as UTILS_IS_ANDROID
 from pet_core.pet_state import PetState
 from pet_core import game_logic
 
@@ -91,6 +107,33 @@ MOOD_DECAY_INTERVAL = 60             # 心情衰减间隔（秒）
 MOOD_DECAY_AMOUNT = 1                # 每次衰减量
 SAVE_INTERVAL = 30                   # 自动保存间隔（秒）
 
+# ========== 多宠相关 ==========
+MAX_PETS = 4                         # 最多同时同屏的宠物数量
+DESKTOP_VIEWPORT = True              # 桌面端：整块屏幕作透明遮罩，多只宠物同在窗口内
+SPECIAL_CD = 20.0                    # 专属操作冷却（秒，每只宠物各自计时）
+
+# 每只宠物的专属操作：招式名 + 只结算到自己身上的奖励/速度
+PET_SPECIAL = {
+    "cockroach": {"name": "元气爆发", "gold": 40, "exp": 20, "mood": 8,
+                  "speed_mult": 2.2, "duration": 2.0},
+    "cat": {"name": "利爪连击", "gold": 55, "exp": 25, "mood": 6,
+            "speed_mult": 2.6, "duration": 1.6},
+    "dog": {"name": "忠犬猛扑", "gold": 50, "exp": 30, "mood": 6,
+            "speed_mult": 2.4, "duration": 1.8},
+    "rabbit": {"name": "飞踢弹跳", "gold": 45, "exp": 28, "mood": 9,
+               "speed_mult": 2.8, "duration": 1.5},
+    "hamster": {"name": "滚球冲击", "gold": 60, "exp": 24, "mood": 7,
+                "speed_mult": 3.0, "duration": 1.4},
+    "corgi": {"name": "短腿旋风", "gold": 65, "exp": 30, "mood": 7,
+              "speed_mult": 2.5, "duration": 1.7},
+    "penguin": {"name": "冰锋啄击", "gold": 58, "exp": 32, "mood": 6,
+                "speed_mult": 2.3, "duration": 1.8},
+    "panda": {"name": "泰山压顶", "gold": 70, "exp": 35, "mood": 5,
+              "speed_mult": 2.1, "duration": 2.0},
+}
+PET_SPECIAL_DEFAULT = {"name": "元气爆发", "gold": 40, "exp": 20, "mood": 8,
+                       "speed_mult": 2.2, "duration": 2.0}
+
 # 边缘定义
 EDGE_TOP = "top"
 EDGE_RIGHT = "right"
@@ -100,23 +143,153 @@ EDGES = (EDGE_TOP, EDGE_RIGHT, EDGE_BOTTOM, EDGE_LEFT)
 
 
 def get_screen_size():
-    """获取主屏幕尺寸（像素）"""
+    """获取主屏幕尺寸（物理像素）
+
+    桌面端优先用 Windows 的 GetSystemMetrics（物理像素，最可靠）；
+    拿不到时退回 Kivy 的 Window.system_size。
+    """
+    if not IS_ANDROID:
+        try:
+            import ctypes
+            u = ctypes.windll.user32
+            w = int(u.GetSystemMetrics(0))     # SM_CXSCREEN
+            h = int(u.GetSystemMetrics(1))     # SM_CYSCREEN
+            if w > 200 and h > 200:
+                return float(w), float(h)
+        except Exception:
+            pass
     return Window.system_size
 
 
-class PetWidget(FloatLayout):
-    """宠物显示控件（精灵 + 气泡）"""
+def register_cjk_font():
+    """注册中文字体
+
+    Kivy 自带的默认字体（Roboto）不含中文字形，不注册的话界面上
+    所有中文都会显示成"口口口"方块。这里优先用项目自带的字体，
+    其次用系统字体，并直接注册成 Kivy 的默认字体名，
+    这样所有 Label 不用改一行代码就都能显示中文。
+
+    返回:
+        str | None: 实际使用的字体路径；没找到则返回 None（保持默认）。
+    """
+    cands = []
+    fdir = os.path.join(resource_dir(), "fonts")
+    for name in ("NotoSansSC-Regular.otf", "SourceHanSansSC-Regular.otf",
+                 "DroidSansFallback.ttf", "cjk.ttf", "font.ttf"):
+        cands.append(os.path.join(fdir, name))
+    if IS_ANDROID:
+        cands += [
+            "/system/fonts/NotoSansCJK-Regular.ttc",
+            "/system/fonts/NotoSansCJKsc-Regular.otf",
+            "/system/fonts/NotoSansSC-Regular.otf",
+            "/system/fonts/DroidSansFallback.ttf",
+        ]
+    else:
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        cands += [os.path.join(windir, "Fonts", n) for n in
+                  ("msyh.ttc", "msyh.ttf", "simhei.ttf", "simsun.ttc",
+                   "Deng.ttf", "msyhl.ttc")]
+    for path in cands:
+        if not os.path.exists(path):
+            continue
+        try:
+            LabelBase.register(name="Roboto", fn_regular=path, fn_bold=path)
+            return path
+        except Exception:
+            continue
+    return None
+
+
+def _find_own_sdl_hwnd():
+    """找到本进程自己的 SDL 窗口句柄（Windows）"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        pid = ctypes.windll.kernel32.GetCurrentProcessId()
+        found = []
+        proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND,
+                                  wintypes.LPARAM)
+        cls = ctypes.create_unicode_buffer(64)
+
+        def _cb(hwnd, _lparam):
+            p = wintypes.DWORD()
+            u.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
+            if p.value == pid:
+                u.GetClassNameW(hwnd, cls, 64)
+                if cls.value.startswith("SDL"):
+                    found.append(hwnd)
+            return True
+        u.EnumWindows(proc(_cb), 0)
+        return found[0] if found else 0
+    except Exception:
+        return 0
+
+
+def enable_desktop_transparency(key=(255, 0, 255)):
+    """桌面端整屏遮罩的透明处理（Windows）
+
+    Kivy/SDL 的窗口默认不支持逐像素透明，光设 clearcolor 的 alpha=0
+    是没用的——窗口会显示成一块纯色遮罩，把整个桌面盖住。
+    这里用 Win32 的"色键透明"：把整窗底色设成 key 色，
+    再给窗口加 WS_EX_LAYERED + LWA_COLORKEY，
+    底色部分就变成全透明（而且鼠标点击会穿透到下层窗口），
+    宠物自己照常显示、照常可点。
+
+    返回:
+        bool: 是否成功开启。
+    """
+    if IS_ANDROID:
+        return False
+    hwnd = _find_own_sdl_hwnd()
+    if not hwnd:
+        return False
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        GWL_EXSTYLE = -20
+        WS_EX_LAYERED = 0x00080000
+        LWA_COLORKEY = 0x00000001
+        ex = u.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        u.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
+        colorref = int(key[0]) | (int(key[1]) << 8) | (int(key[2]) << 16)
+        ok = u.SetLayeredWindowAttributes(hwnd, ctypes.c_uint(colorref),
+                                          0, LWA_COLORKEY)
+        return bool(ok)
+    except Exception:
+        return False
+
+
+class PetWidget(object):
+    """宠物显示件：精灵 + 气泡
+
+    ★ 为什么不用"父控件里塞子控件"的写法
+    Kivy 里只有 RelativeLayout 会给自己的画布加位移，普通 Widget / FloatLayout
+    的 pos 并不会平移子控件的画布——子控件的局部坐标 (0, 0) 会直接落到屏幕
+    左下角，多只宠物就全部叠在同一个角落（看起来"只有一只宠物能点"）。
+    所以这里精灵用 root 画布上的 Rectangle（绝对坐标，且压在子控件之下）、
+    气泡用 root 的直接子控件 Label（绝对坐标），位置全部由 PetUnit 自己算，
+    每只宠物各画各的，互不干扰。
+    """
 
     def __init__(self, pet_app, **kwargs):
-        super().__init__(**kwargs)
         self.pet_app = pet_app
-        self.size_hint = (None, None)
+        # pet_app 可能是 PetUnit（弹窗上下文），也可能是 PetApp 本身
+        app = getattr(pet_app, "app", pet_app) or pet_app
+        self._app = app
+        self._frame_w = 64.0
+        self._frame_h = 64.0
+        self._x = 0.0
+        self._y = 0.0
+        self._bubble_timer = None
 
-        # 宠物精灵
-        self.sprite = Image(size_hint=(None, None), fit_mode='contain')
-        self.add_widget(self.sprite)
+        # ---- 精灵：画在 root 画布的 before 组里（绝对坐标，位于所有子控件之下）----
+        canvas = app.root.canvas
+        with canvas.before:
+            self._sprite_color = Color(1, 1, 1, 1)
+            self.sprite = Rectangle(pos=(0, 0), size=(0, 0))
 
-        # 气泡标签
+        # ---- 气泡：root 的直接子控件（与计数 HUD 同一套写法）----
         self.bubble_label = Label(
             text="",
             size_hint=(None, None),
@@ -126,19 +299,42 @@ class PetWidget(FloatLayout):
             padding=(dp(8), dp(4)),
             opacity=0,
         )
-        # 气泡背景
+        # 气泡背景（桌面端是色键透明遮罩，半透明会混出底色，所以用不透明）
         with self.bubble_label.canvas.before:
-            self._bubble_border_color = Color(0.6, 0.6, 0.6, 0.9)
+            self._bubble_border_color = Color(0.55, 0.55, 0.6, 1)
             self._bubble_border = Rectangle(pos=(0, 0), size=(0, 0))
-            self._bubble_bg_color = Color(1, 1, 1, 0.95)
+            self._bubble_bg_color = Color(1, 1, 1, 1)
             self._bubble_bg = Rectangle(pos=(0, 0), size=(0, 0))
         self.bubble_label.bind(pos=self._update_bubble_bg,
                                size=self._update_bubble_bg)
-        self.add_widget(self.bubble_label)
+        app.root.add_widget(self.bubble_label)
 
-        self._bubble_timer = None
-        self._frame_w = 64
-        self._frame_h = 64
+    # ------------------------------------------------------------ 几何
+    def set_frame_size(self, width, height):
+        """设置精灵帧尺寸（精灵左下角就是 pos）"""
+        self._frame_w = float(width)
+        self._frame_h = float(height)
+        self.sprite.size = (self._frame_w, self._frame_h)
+        self.sprite.pos = (self._x, self._y)
+
+    def set_pos(self, x, y):
+        """移动精灵（绝对屏幕坐标，左下角）"""
+        self._x, self._y = float(x), float(y)
+        self.sprite.pos = (self._x, self._y)
+        if self.bubble_label.opacity > 0:
+            self._place_bubble()
+
+    # pos / size / x / y：用法和普通控件一致
+    pos = property(lambda self: (self._x, self._y),
+                   lambda self, value: self.set_pos(value[0], value[1]))
+    size = property(lambda self: (self._frame_w, self._frame_h))
+    x = property(lambda self: self._x)
+    y = property(lambda self: self._y)
+
+    def _place_bubble(self):
+        tw, th = self.bubble_label.size
+        self.bubble_label.pos = (self._x + (self._frame_w - tw) / 2.0,
+                                 self._y + self._frame_h + BUBBLE_HEIGHT - 4)
 
     def _update_bubble_bg(self, instance, value):
         """更新气泡背景矩形的位置和大小"""
@@ -149,31 +345,19 @@ class PetWidget(FloatLayout):
         self._bubble_border.pos = (x, y)
         self._bubble_border.size = (w, h)
 
-    def set_frame_size(self, width, height):
-        """设置精灵帧尺寸，并调整整体控件大小"""
-        self._frame_w = width
-        self._frame_h = height
-        self.sprite.size = (width, height)
-        self.sprite.pos = (0, BUBBLE_HEIGHT)  # 精灵在底部，上方留气泡空间
-        self.size = (width, height + BUBBLE_HEIGHT)
-
+    # ------------------------------------------------------------ 显示
     def update_frame(self, texture):
         """更新精灵帧纹理"""
         self.sprite.texture = texture
 
     def show_bubble(self, text, duration=BUBBLE_DURATION):
         """显示气泡台词"""
-        # 估算文本宽度
         text_w = max(dp(60), len(text) * dp(14) + dp(16))
         text_h = dp(24)
         self.bubble_label.text = text
         self.bubble_label.size = (text_w, text_h)
-        self.bubble_label.pos = (
-            (self._frame_w - text_w) / 2,
-            self._frame_h + BUBBLE_HEIGHT - 4
-        )
+        self._place_bubble()
         self.bubble_label.opacity = 1
-
         if self._bubble_timer:
             self._bubble_timer.cancel()
         self._bubble_timer = Clock.schedule_once(self._hide_bubble, duration)
@@ -183,14 +367,43 @@ class PetWidget(FloatLayout):
         self.bubble_label.opacity = 0
         self._bubble_timer = None
 
+    # ------------------------------------------------------------ 命中测试
     def is_point_on_pet(self, x, y):
-        """判断点 (x, y) 是否在宠物精灵区域内"""
-        # 控件坐标：原点在左下角
-        sprite_x0 = self.sprite.x
-        sprite_y0 = self.sprite.y
-        sprite_x1 = sprite_x0 + self._frame_w
-        sprite_y1 = sprite_y0 + self._frame_h
-        return sprite_x0 <= x <= sprite_x1 and sprite_y0 <= y <= sprite_y1
+        """判断屏幕坐标 (x, y) 是否落在精灵矩形内（绝对坐标直接比较）"""
+        return (self._x <= x <= self._x + self._frame_w and
+                self._y <= y <= self._y + self._frame_h)
+
+    def hit_test(self, x, y):
+        """每只宠物各自算自己的矩形，多宠互不干扰"""
+        return self.is_point_on_pet(x, y)
+
+    # ------------------------------------------------------------ 层级 / 清理
+    def raise_me(self):
+        """把这只宠物提到最上层（只动自己的画布，不碰其他宠物和 HUD）"""
+        c = self._app.root.canvas.before
+        for instr in (self._sprite_color, self.sprite):
+            try:
+                c.remove(instr)
+            except Exception:
+                pass
+        c.add(self._sprite_color)
+        c.add(self.sprite)
+
+    def remove_me(self):
+        """把自己从画布和控件树上摘掉（其他宠物照常活动）"""
+        c = self._app.root.canvas.before
+        for instr in (self._sprite_color, self.sprite):
+            try:
+                c.remove(instr)
+            except Exception:
+                pass
+        if self._bubble_timer:
+            self._bubble_timer.cancel()
+            self._bubble_timer = None
+        try:
+            self._app.root.remove_widget(self.bubble_label)
+        except Exception:
+            pass
 
 
 class PetMenuPopup(Popup):
@@ -199,12 +412,20 @@ class PetMenuPopup(Popup):
     def __init__(self, pet_app, **kwargs):
         super().__init__(**kwargs)
         self.pet_app = pet_app
-        self.title = "宠物菜单"
+        # 标题带上这只宠物自己的名字：多宠同屏时一眼分清在操作谁
+        self.title = "%s 的菜单" % getattr(pet_app, "title", "宠物")
         self.size_hint = (None, None)
-        self.size = (dp(300), dp(420))
+        self.size = (dp(300), dp(460))
         self.auto_dismiss = True
         self.title_size = dp(16)
         self.separator_height = dp(2)
+
+        # 这只宠物自己的专属操作名（每只宠物不一样）
+        sp_name = "专属技能"
+        try:
+            sp_name = "专属·%s" % pet_app.special_name()
+        except Exception:
+            pass
 
         # 外层布局
         outer = BoxLayout(orientation='vertical', padding=dp(6), spacing=dp(4))
@@ -235,6 +456,20 @@ class PetMenuPopup(Popup):
             btn.bind(on_release=callback)
             interact_grid.add_widget(btn)
         scroll_layout.add_widget(interact_grid)
+
+        # —— 专属操作组（每只宠物有自己的招式，只作用于它自己）——
+        scroll_layout.add_widget(make_section("—— 专属 ——"))
+        special_grid = GridLayout(cols=2, spacing=dp(4),
+                                  size_hint_y=None, height=dp(42))
+        special_items = [
+            (sp_name, self.on_special),
+            ("让它离场", self.on_leave),
+        ]
+        for text, callback in special_items:
+            btn = Button(text=text, font_size=dp(11))
+            btn.bind(on_release=callback)
+            special_grid.add_widget(btn)
+        scroll_layout.add_widget(special_grid)
 
         # —— RPG 组 ——
         scroll_layout.add_widget(make_section("—— RPG ——"))
@@ -284,6 +519,18 @@ class PetMenuPopup(Popup):
     def on_play(self, instance):
         self.dismiss()
         self.pet_app.action_play()
+
+    def on_special(self, instance):
+        """释放这只宠物的专属操作（只结算到它自己身上）"""
+        self.dismiss()
+        self.pet_app.action_special()
+
+    def on_leave(self, instance):
+        """让这只宠物离场（其他宠物继续活动）"""
+        self.dismiss()
+        app = getattr(self.pet_app, "app", None)
+        if app is not None:
+            app.remove_pet(self.pet_app)
 
     def on_adventure(self, instance):
         self.dismiss()
@@ -1175,6 +1422,15 @@ class PetSelectPopup(Popup):
         )
         layout.add_widget(self.current_label)
 
+        # 可选宠物数量（实时计数，随解锁/同屏增减立即变化）
+        self.count_label = Label(
+            text="",
+            size_hint_y=None, height=dp(22),
+            font_size=dp(11), color=(0.30, 0.52, 0.92, 1),
+        )
+        layout.add_widget(self.count_label)
+        self._refresh_count_label()
+
         # 宠物列表（滚动）
         scroll = ScrollView(size_hint=(1, 1))
         self.pet_grid = GridLayout(cols=2, spacing=dp(6), size_hint_y=None)
@@ -1209,6 +1465,16 @@ class PetSelectPopup(Popup):
         )
         self.confirm_btn.bind(on_release=self._on_confirm)
         layout.add_widget(self.confirm_btn)
+
+        # 加入同屏：把选中的宠物再放一只上场（多宠并存）
+        self.add_btn = Button(
+            text="加入同屏（再来一只）",
+            size_hint_y=None, height=dp(36),
+            font_size=dp(13), bold=True,
+            background_color=(0.24, 0.68, 0.42, 1),
+        )
+        self.add_btn.bind(on_release=self._on_add)
+        layout.add_widget(self.add_btn)
 
         # 关闭按钮
         close_btn = Button(text="取消", size_hint_y=None, height=dp(36),
@@ -1294,88 +1560,84 @@ class PetSelectPopup(Popup):
         skin_id = self._skin_id_map.get(text, "default")
         self._selected_skin = skin_id
 
+    def _refresh_count_label(self):
+        """刷新「可选宠物数量」：已解锁可选总数 + 当前同屏可点击数量"""
+        try:
+            app = getattr(self.pet_app, "app", self.pet_app)
+            on_screen = app.onscreen_count()
+        except Exception:
+            on_screen = 1
+        self.count_label.text = "可选宠物数量：%d　·　同屏可点击：%d 只" % (
+            len(self._unlocked), on_screen)
+
+    def _on_add(self, instance):
+        """加入同屏：把选中的宠物再放一只上场，各自独立操作"""
+        app = getattr(self.pet_app, "app", self.pet_app)
+        name = pet_display_name(self._selected_pet)
+        if len(app.pets) >= MAX_PETS:
+            self.current_label.text = "最多同时养 %d 只啦" % MAX_PETS
+            return
+        if any(p.pet_id == self._selected_pet for p in app.pets):
+            self.current_label.text = "「%s」已经在屏幕上啦" % name
+            return
+        app.spawn_pet(self._selected_pet, self._selected_skin, slot="extra")
+        app._save_config()
+        self._refresh_count_label()
+        self.current_label.text = "已加入同屏：%s" % name
+
     def _on_confirm(self, instance):
-        """确认更换宠物"""
-        pet_app = self.pet_app
-        pet_id = self._selected_pet
-        skin = self._selected_skin
-
-        # 保存当前宠物状态
-        pet_app.pet_state.save(pet_app.pet_id)
-
-        # 保存配置到可写数据目录
-        save_pet_config(pet_id, skin)
-
-        # 加载新宠物状态
-        pet_app.pet_id = pet_id
-        pet_app.pet_skin = skin
-        pet_app.pet_name = pet_display_name(pet_id)
-        pet_app.pet_state = PetState.load(pet_id)
-
-        # 重新加载精灵帧
-        pet_app.frames = pet_app._load_frames()
-        pet_app.frame_w, pet_app.frame_h = pet_app._get_frame_size()
-        pet_app.win_w = pet_app.frame_w
-        pet_app.win_h = pet_app.frame_h + BUBBLE_HEIGHT
-
-        if not IS_ANDROID:
-            # 桌面端：更新窗口大小
-            Window.size = (pet_app.win_w, pet_app.win_h)
-            pet_app.root.size = (pet_app.win_w, pet_app.win_h)
-
-        pet_app.pet_widget.set_frame_size(pet_app.frame_w, pet_app.frame_h)
-        pet_app._update_sprite_frame()
-        pet_app._update_position()
-
+        """确认更换：只把「被长按的那只」换成选中的宠物/皮肤"""
+        pet = self.pet_app
+        app = getattr(pet, "app", pet)
+        pet.apply_pet(self._selected_pet, self._selected_skin)
+        try:
+            app._save_config()
+        except Exception:
+            pass
+        try:
+            app._sync_window_size()
+        except Exception:
+            pass
         self.dismiss()
-        pet_app.show_bubble("换了个新形象！")
+        pet.show_bubble("换了个新形象！")
 
 
-class PetApp(App):
-    """电子宠物主应用"""
+class PetUnit:
+    """单只宠物：独立的状态、精灵、移动与交互。
 
-    def build(self):
-        # ===== 设置可写数据目录（Android 上必须）=====
-        # Android 上 App.user_data_dir 是应用私有的可写目录
-        set_data_dir(self.user_data_dir)
+    每只宠物都是独立的 PetUnit 实例——各自一份存档、各自一套精灵帧、
+    各自的位置/朝向/状态机、各自的长按计时器与操作菜单。
+    点谁就操作谁，彼此不干扰。
 
-        # ===== 窗口基础设置 =====
-        if not IS_ANDROID:
-            # 桌面端：透明背景 + 无边框 + 置顶
-            Window.clearcolor = (0, 0, 0, 0)  # 透明背景
-            Window.borderless = True
-            # 尝试置顶（平台相关）
-            try:
-                Window.topmost = True
-            except Exception:
-                pass
-        else:
-            # Android 端：半透明深色背景，全屏显示
-            # 透明背景在 Android 上不可行，使用深色半透明背景
-            Window.clearcolor = (0.1, 0.1, 0.15, 0.95)
-            # 全屏显示
-            Window.fullscreen = 'auto'
+    PetUnit 同时充当各弹窗的上下文（弹窗第一个参数）：弹窗里读到的
+    ``pet_app.pet_state`` 就是这只宠物自己的存档，
+    ``pet_app.show_inventory()`` 打开的也是这只宠物自己的面板。
+    """
 
-        # ===== 加载宠物配置 =====
-        self.pet_id, self.pet_skin = load_pet_config()
-        self.pet_id = resolve_pet(self.pet_id)
+    def __init__(self, app, pet_id, skin, slot="primary", index=0):
+        self.app = app
+        self.slot = slot              # primary / second / extra
+        self.index = index            # 同屏序号（用于出生错位摆放）
+        self.pet_id = pet_id
+        self.pet_skin = skin or "default"
         self.pet_name = pet_display_name(self.pet_id)
 
-        # ===== 加载状态 =====
+        # ===== 状态存档（每只宠物一份，互不影响）=====
         self.pet_state = PetState.load(self.pet_id)
 
-        # ===== 加载精灵帧 =====
+        # ===== 精灵帧 =====
         self.frames = self._load_frames()
         self.frame_w, self.frame_h = self._get_frame_size()
         self.win_w = self.frame_w
         self.win_h = self.frame_h + BUBBLE_HEIGHT
 
-        # ===== 屏幕尺寸 =====
-        self.screen_w, self.screen_h = get_screen_size()
+        # ===== 屏幕尺寸（跟随 App，屏幕变化时统一刷新）=====
+        self.screen_w = app.screen_w
+        self.screen_h = app.screen_h
 
         # ===== 移动状态 =====
         self.edge = EDGE_TOP          # 当前所在边缘
-        self.dir = 1                  # 移动方向 +1 顺时针 / -1 逆时针
+        self.dir = 1                  # +1 顺时针 / -1 逆时针
         self.facing_right = True      # 朝向（True=右，False=左）
         self.move_state = "walk"      # walk / idle / scared
         self.state_time_left = 0      # 状态剩余时间（秒）
@@ -1383,69 +1645,108 @@ class PetApp(App):
         self.anim_index = 0           # 动画帧索引
         self.anim_time = 0            # 动画计时器
 
-        # ===== 宠物位置（左上角坐标）=====
-        # 内部统一使用"桌面坐标系"：win_x 从左往右，win_y 从上往下
-        # 桌面端：直接对应 Window.left / Window.top
-        # Android 端：在 _update_position 中转换为 Kivy 坐标（y 从下往上）
-        self.win_x = (self.screen_w - self.win_w) / 2
-        self.win_y = 0  # 顶部边缘
+        # ===== 内部桌面坐标（左上角，x 从左往右、y 从上往下）=====
+        self.win_x = 0.0
+        self.win_y = 0.0
 
         # ===== 交互状态 =====
         self._press_time = 0
         self._long_press_triggered = False
         self._long_press_event = None
 
-        # ===== 创建 UI =====
-        if not IS_ANDROID:
-            # 桌面端：小窗口模式，root 就是窗口大小
-            self.root = FloatLayout(size=(self.win_w, self.win_h), size_hint=(None, None))
-            self.pet_widget = PetWidget(self)
-            self.pet_widget.set_frame_size(self.frame_w, self.frame_h)
-            self.pet_widget.pos = (0, 0)
-            self.root.add_widget(self.pet_widget)
+        # ===== 专属操作冷却（每只宠物各自计时）=====
+        self.special_cd = 0.0
 
-            # 绑定触摸事件到 root widget
-            self.root.bind(on_touch_down=self._on_touch_down)
-            self.root.bind(on_touch_up=self._on_touch_up)
+        # ===== 显示控件 =====
+        self.pet_widget = PetWidget(self)
+        self.pet_widget.set_frame_size(self.frame_w, self.frame_h)
+        self.pet_widget.set_pos(0, 0)
+        self.reset_place()
 
-            # 设置窗口大小
-            Window.size = (self.win_w, self.win_h)
+    @property
+    def title(self):
+        """显示名（有昵称优先，与桌面板一致）"""
+        nick = getattr(self.pet_state, "nickname", "") or ""
+        return nick or self.pet_name
+
+    # ------------------------------------------------------------ 摆位 / 存档
+    def reset_place(self):
+        """按同屏序号把宠物错开摆在不同边缘，避免重叠导致只有一只点得到"""
+        max_x = max(1.0, self.screen_w - self.win_w)
+        max_y = max(1.0, self.screen_h - self.win_h)
+        n = max(1, int(getattr(self.app, "max_spawn", MAX_PETS)))
+        seg = self.screen_w / float(n + 1)
+        self.win_x = min(max_x, seg * (self.index + 1) - self.win_w / 2.0)
+        if self.index % 2 == 0:
+            self.edge = EDGE_TOP
+            self.win_y = 0.0
         else:
-            # Android 端：全屏模式，root 占满整个屏幕
-            self.root = FloatLayout(size_hint=(1, 1))
-            self.pet_widget = PetWidget(self)
-            self.pet_widget.set_frame_size(self.frame_w, self.frame_h)
-            # 设置初始位置
-            self.pet_widget.pos = (self.win_x, self.win_y)
-            self.root.add_widget(self.pet_widget)
-
-            # 绑定触摸事件到 root widget（全屏都能响应）
-            self.root.bind(on_touch_down=self._on_touch_down)
-            self.root.bind(on_touch_up=self._on_touch_up)
-
-            # 监听窗口大小变化（屏幕旋转等）
-            Window.bind(on_resize=self._on_window_resize)
-
-        # ===== 初始化显示 =====
-        self._update_sprite_frame()
+            self.edge = EDGE_BOTTOM
+            self.win_y = float(max_y)
+        self.move_state = "walk"
+        self.state_time_left = 0
+        self.speed = BASE_SPEED
+        self.dir = 1 if self.index % 2 == 0 else -1
+        self.facing_right = True
         self._update_position()
 
-        # ===== 启动定时器 =====
-        # 动画更新
-        Clock.schedule_interval(self._update_animation, 1.0 / ANIM_FPS)
-        # 移动更新
-        Clock.schedule_interval(self._update_movement, MOVE_TICK_MS / 1000.0)
-        # 饱腹度衰减
-        Clock.schedule_interval(self._decay_hunger, HUNGER_DECAY_INTERVAL)
-        # 心情衰减
-        Clock.schedule_interval(self._decay_mood, MOOD_DECAY_INTERVAL)
-        # 自动保存
-        Clock.schedule_interval(self._auto_save, SAVE_INTERVAL)
+    def set_screen_size(self, width, height):
+        """屏幕尺寸变化时重新夹取位置"""
+        self.screen_w = width
+        self.screen_h = height
+        max_x = max(0.0, self.screen_w - self.win_w)
+        max_y = max(0.0, self.screen_h - self.win_h)
+        self.win_x = max(0.0, min(self.win_x, max_x))
+        self.win_y = max(0.0, min(self.win_y, max_y))
+        self._update_position()
 
-        # 欢迎气泡
-        Clock.schedule_once(lambda dt: self.show_bubble("点我试试！"), 1.0)
+    def save(self):
+        """保存这只宠物的存档"""
+        try:
+            self.pet_state.save(self.pet_id)
+        except Exception:
+            pass
 
-        return self.root
+    def apply_pet(self, pet_id, skin):
+        """换成另一只宠物/皮肤（只影响本实例，其他宠物不动）"""
+        self.save()
+        self.pet_id = pet_id
+        self.pet_skin = skin or "default"
+        self.pet_name = pet_display_name(pet_id)
+        self.pet_state = PetState.load(pet_id)
+        self.frames = self._load_frames()
+        self.frame_w, self.frame_h = self._get_frame_size()
+        self.win_w = self.frame_w
+        self.win_h = self.frame_h + BUBBLE_HEIGHT
+        self.pet_widget.set_frame_size(self.frame_w, self.frame_h)
+        self._update_sprite_frame()
+        self.set_screen_size(self.screen_w, self.screen_h)
+
+    # ------------------------------------------------------------ 弹窗（主体都是"自己"）
+    def show_stats_panel(self):
+        StatsPanel(self).open()
+
+    def show_adventure(self):
+        AdventurePopup(self).open()
+
+    def show_shop(self):
+        ShopPopup(self).open()
+
+    def show_inventory(self):
+        InventoryPopup(self).open()
+
+    def show_signin(self):
+        SigninPopup(self).open()
+
+    def show_achievement(self):
+        AchievementPopup(self).open()
+
+    def show_pet_select(self):
+        PetSelectPopup(self).open()
+
+    def quit_app(self):
+        """退出整个应用（所有宠物共用一个进程）"""
+        self.app.quit_app()
 
     # ============================================================
     # 精灵帧加载
@@ -1699,109 +2000,81 @@ class PetApp(App):
             self.win_y = random.uniform(0, max_y)
             self.dir = random.choice([-1, 1])
 
-    def _update_position(self):
-        """更新宠物位置
 
-        桌面端：移动窗口位置（Window.left / Window.top）
-        Android 端：移动 pet_widget 在全屏布局中的位置
+    def _update_position(self):
+        """把宠物按内部桌面坐标摆到屏幕上
+
+        视口模式（Android / 桌面全屏遮罩）：宠物是布局里的控件，直接改 pos；
+        窗口模式（桌面单宠小窗）：整块窗口跟着宠物移动。
         """
-        if not IS_ANDROID:
-            # 桌面端：Window.left / Window.top 控制窗口位置
-            # Kivy 的坐标：top 是从屏幕顶部往下的距离
+        if self.app.viewport_mode:
+            kivy_x = int(self.win_x)
+            kivy_y = int(self.app.screen_h - self.win_y - self.win_h)
+            self.pet_widget.pos = (kivy_x, kivy_y)
+        else:
             Window.left = int(self.win_x)
             Window.top = int(self.win_y)
-        else:
-            # Android 端：修改 pet_widget 的 pos 属性
-            # 内部坐标：win_y 从上往下（桌面坐标系）
-            # Kivy 坐标：y 从下往上
-            # 转换公式：kivy_y = screen_h - win_y - win_h
-            kivy_x = int(self.win_x)
-            kivy_y = int(self.screen_h - self.win_y - self.win_h)
-            self.pet_widget.pos = (kivy_x, kivy_y)
 
-    def _on_window_resize(self, instance, width, height):
-        """窗口大小变化回调（Android 屏幕旋转时触发）
+    # ------------------------------------------------------------ 交互
+    def hit_test(self, widget, touch):
+        """这次点击是否落在这只宠物身上（每只宠物各自命中测试）
 
-        重新计算屏幕尺寸，并将宠物位置限制在屏幕内。
+        直接用窗口坐标判定精灵矩形，不依赖控件布局是否已完成，
+        所以多只宠物各自独立、互不干扰。
         """
-        self.screen_w = width
-        self.screen_h = height
-        # 确保宠物在屏幕范围内（内部坐标系）
-        max_x = self.screen_w - self.win_w
-        max_y = self.screen_h - self.win_h
-        self.win_x = max(0, min(self.win_x, max_x))
-        self.win_y = max(0, min(self.win_y, max_y))
-        self._update_position()
-
-    # ============================================================
-    # 交互系统
-    # ============================================================
-    def _on_touch_down(self, widget, touch):
-        """触摸按下事件"""
-        if not widget.collide_point(*touch.pos):
-            return False
-        # 将触摸坐标转换为 pet_widget 本地坐标
-        local = self.pet_widget.to_widget(touch.x, touch.y)
-        if not self.pet_widget.is_point_on_pet(local[0], local[1]):
+        try:
+            return self.pet_widget.hit_test(touch.x, touch.y)
+        except Exception:
             return False
 
+    def begin_press(self):
+        """按下：开始这只宠物自己的长按计时"""
         self._press_time = time.time()
         self._long_press_triggered = False
-
-        # 启动长按计时器
         if self._long_press_event:
             self._long_press_event.cancel()
         self._long_press_event = Clock.schedule_once(
-            self._on_long_press, LONG_PRESS_TIME
-        )
-        return True
+            self._on_long_press, LONG_PRESS_TIME)
 
-    def _on_touch_up(self, widget, touch):
-        """触摸释放事件"""
+    def cancel_press(self):
+        """取消按下状态"""
         if self._long_press_event:
             self._long_press_event.cancel()
             self._long_press_event = None
 
-        # 长按已触发则不处理点击
+    def finish_press(self, widget, touch):
+        """松手：长按已弹菜单就忽略，否则算一次点击"""
+        self.cancel_press()
         if self._long_press_triggered:
             self._long_press_triggered = False
             return True
-
-        # 短按 = 点击
-        press_duration = time.time() - self._press_time
-        if press_duration < LONG_PRESS_TIME:
-            if widget.collide_point(*touch.pos):
-                local = self.pet_widget.to_widget(touch.x, touch.y)
-                if self.pet_widget.is_point_on_pet(local[0], local[1]):
-                    self._on_pet_click()
-                    return True
-
+        if time.time() - self._press_time < LONG_PRESS_TIME:
+            if self.hit_test(widget, touch):
+                self.on_click()
+                return True
         return False
 
-    def _on_pet_click(self):
-        """点击宠物：受惊反应"""
+    def on_click(self):
+        """点击：只有被点的这只受惊，其他宠物不受影响"""
         self.move_state = "scared"
         self.state_time_left = SCARED_DURATION
         self.speed = BASE_SPEED * SCARED_SPEED_MULT
-        self.dir = -self.dir  # 反向逃跑
+        self.dir = -self.dir          # 反向逃跑
         self.anim_index = 0
-
-        # 显示气泡台词
         lines = get_pet_lines(self.pet_id, "click")
         if lines:
             self.show_bubble(random.choice(lines))
-
-        # 统计
         self.pet_state.stats["click"] = self.pet_state.stats.get("click", 0) + 1
-        self.pet_state.quest["interact"] = self.pet_state.quest.get("interact", 0) + 1
+        self.pet_state.quest["interact"] = \
+            self.pet_state.quest.get("interact", 0) + 1
 
     def _on_long_press(self, dt):
-        """长按宠物：弹出菜单"""
+        """长按：只弹这只宠物自己的操作菜单"""
         self._long_press_triggered = True
         self.show_menu()
 
     def show_menu(self):
-        """显示操作菜单"""
+        """这只宠物的操作菜单（菜单里的操作全部作用于它自己）"""
         menu = PetMenuPopup(self)
         menu.open()
 
@@ -1954,28 +2227,502 @@ class PetApp(App):
         """自动保存状态到文件"""
         self.pet_state.save(self.pet_id)
 
+
+    # ------------------------------------------------------------ 专属操作
+    def special_name(self):
+        """本宠物的专属操作名（菜单/界面显示用）"""
+        return PET_SPECIAL.get(self.pet_id, PET_SPECIAL_DEFAULT)["name"]
+
+    def _update_special(self, dt):
+        """专属操作冷却计时（每只宠物各自递减）"""
+        if self.special_cd > 0:
+            self.special_cd = max(0.0, self.special_cd - dt)
+
+    def action_special(self):
+        """释放本宠物的专属操作
+
+        每只宠物有自己的招式名与效果数值，而且只结算到自己身上：
+        只加自己的金币/经验/心情、只让自己冲刺，其他宠物完全不受影响。
+        """
+        info = PET_SPECIAL.get(self.pet_id, PET_SPECIAL_DEFAULT)
+        name = info["name"]
+        if self.special_cd > 0:
+            self.show_bubble("「%s」冷却中（%.1fs）" % (name, self.special_cd))
+            return False
+        self.special_cd = SPECIAL_CD
+        self.move_state = "scared"
+        self.state_time_left = info["duration"]
+        self.speed = BASE_SPEED * info["speed_mult"]
+        self.pet_state.mood = min(100, self.pet_state.mood + info["mood"])
+        self.pet_state.gold = self.pet_state.gold + info["gold"]
+        self.pet_state.total_gold = self.pet_state.total_gold + info["gold"]
+        self._add_exp(info["exp"])
+        self.show_bubble("%s·%s！" % (self.pet_name, name))
+        return True
+
+
+class PetApp(App):
+    """电子宠物主应用
+
+    负责窗口、宠物集合的编排与调度；每只宠物的行为都在 PetUnit 里。
+    支持多只宠物同屏：各自独立点击、独立菜单、独立专属操作、互不干扰。
+    """
+
+    def build(self):
+        # ===== 设置可写数据目录（Android 上必须）=====
+        set_data_dir(self.user_data_dir)
+
+        # ===== 中文字体（必须在建任何 Label 之前）=====
+        register_cjk_font()
+
+        # ===== 屏幕尺寸 / 窗口尺寸（摆位要用，先拿到）=====
+        # 关键：Windows 高 DPI 下 Kivy 把 Window.size 当"逻辑尺寸"，
+        # 写进去的值会被 Metrics.density 放大成物理像素（本机 200% 缩放，
+        # 写 3072 实际得到 6144 的窗口 → 窗口变成屏幕两倍大，
+        # 宠物全被摆到屏幕外）。而精灵帧尺寸本身就是物理像素，
+        # 所以这里统一按物理像素算，窗口尺寸再除回 density，
+        # 保证「窗口正好铺满屏幕」且「控件坐标 == 物理像素」。
+        self.viewport_mode = IS_ANDROID or DESKTOP_VIEWPORT
+        density = max(1.0, float(getattr(Metrics, "density", 1.0) or 1.0))
+        self.transparent = False
+
+        if not IS_ANDROID:
+            Window.borderless = True
+            try:
+                Window.topmost = True
+            except Exception:
+                pass
+            if self.viewport_mode:
+                phys_w, phys_h = get_screen_size()
+                Window.size = (max(1, int(phys_w / density)),
+                               max(1, int(phys_h / density)))
+                try:
+                    Window.left = 0
+                    Window.top = 0
+                except Exception:
+                    pass
+                # 整屏遮罩 + 色键透明（否则整块窗口会把桌面盖黑）
+                Window.clearcolor = (1, 0, 1, 1)      # 色键底色（洋红）
+                self.transparent = enable_desktop_transparency((255, 0, 255))
+                if not self.transparent:
+                    # 透明没挂上就退化成深色底，至少不会是一屏洋红
+                    Window.clearcolor = (0.06, 0.06, 0.09, 1)
+            else:
+                Window.clearcolor = (0, 0, 0, 0)
+                Window.size = (int(dp(160)), int(dp(160)))
+            self.screen_w, self.screen_h = self._current_screen_size()
+        else:
+            Window.clearcolor = (0.1, 0.1, 0.15, 1)
+            Window.fullscreen = 'auto'
+            self.screen_w, self.screen_h = self._current_screen_size()
+
+        # ===== 根控件 =====
+        # 用纯 Widget：根控件不参与布局，子控件（每只宠物、HUD）的 pos
+        # 完全由我们自己控制，不会被布局系统重置。
+        self.root = Widget(size_hint=(1, 1))
+
+        # ===== 装配宠物集合 =====
+        self.pets = []                 # 同屏宠物（后创建的在上层）
+        self.max_spawn = MAX_PETS      # 摆位参考值
+        self._pressed_pet = None       # 当前被按住的宠物（保证松手正确收尾）
+        self.hud = None
+
+        for i, (pet_id, skin, slot) in enumerate(self._load_pet_entries()):
+            self.spawn_pet(pet_id, skin, slot=slot, index=i, silent=True)
+
+        # ===== 计数 HUD：可选宠物数量 =====
+        self._build_hud()
+
+        # ===== 触摸绑定（统一分发给命中的那只宠物）=====
+        self.root.bind(on_touch_down=self._on_touch_down)
+        self.root.bind(on_touch_up=self._on_touch_up)
+        Window.bind(on_resize=self._on_window_resize)
+
+        # ===== 定时器：统一驱动所有宠物 =====
+        Clock.schedule_interval(self._tick_animation, 1.0 / ANIM_FPS)
+        Clock.schedule_interval(self._tick_movement, MOVE_TICK_MS / 1000.0)
+        Clock.schedule_interval(self._tick_hunger, HUNGER_DECAY_INTERVAL)
+        Clock.schedule_interval(self._tick_mood, MOOD_DECAY_INTERVAL)
+        Clock.schedule_interval(self._auto_save, SAVE_INTERVAL)
+        Clock.schedule_interval(self._refresh_hud, 1.0)
+
+        if not self.viewport_mode:
+            self._sync_window_size()
+        for pet in self.pets:
+            pet._update_sprite_frame()
+            pet._update_position()
+
+        Clock.schedule_once(lambda dt: self.show_bubble("点我试试！"), 1.0)
+        self._refresh_hud()
+
+        # ===== 窗口尺寸稳定后再校准一次（并重挂透明）=====
+        Clock.schedule_once(self._settle_window, 0.4)
+        return self.root
+
+    # ------------------------------------------------------------ 窗口
+    def _current_screen_size(self):
+        """当前可用的活动区域尺寸（控件坐标口径 = 物理像素）
+
+        桌面端以 Windows 报告的物理像素为准（窗口正好铺满屏幕，
+        所以两者一致）；Android 端用 Kivy 自己的窗口尺寸。
+        """
+        if not IS_ANDROID:
+            w, h = get_screen_size()
+            if w > 200 and h > 200:
+                return float(w), float(h)
+        try:
+            w, h = Window.size
+            if w > 200 and h > 200:
+                return float(w), float(h)
+        except Exception:
+            pass
+        return float(self.screen_w or 800), float(self.screen_h or 600)
+
+    def _settle_window(self, dt=0):
+        """窗口尺寸稳定后重新校准屏幕尺寸、宠物位置与透明色键"""
+        w, h = self._current_screen_size()
+        if abs(w - self.screen_w) > 2 or abs(h - self.screen_h) > 2:
+            self.screen_w, self.screen_h = w, h
+            for pet in self.pets:
+                pet.set_screen_size(w, h)
+        if self.hud is not None and self.viewport_mode:
+            self.hud.pos = (dp(10), self.screen_h - dp(58))
+            self._raise_hud()
+        for pet in self.pets:
+            pet._update_position()
+        # 窗口尺寸变化会丢掉 WS_EX_LAYERED，这里重挂一次
+        if not IS_ANDROID and self.viewport_mode:
+            self.transparent = enable_desktop_transparency((255, 0, 255))
+            if not self.transparent:
+                Window.clearcolor = (0.06, 0.06, 0.09, 1)
+
+    # ============================================================
+    # 宠物集合：装配 / 增删 / 计数
+    # ============================================================
+    def _load_pet_entries(self):
+        """读配置得到同屏宠物列表 [(pet_id, skin, slot), ...]
+
+        来源 pet_config.json：
+          - "pet" / "skin"           主宠（slot=primary）
+          - "second_pet" {pet,skin}  第二只（slot=second）
+          - "extra_pets" [{..}, ..]  更多只（slot=extra）
+        未解锁的回退到已解锁宠物；同一只宠物只出现一次。
+        """
+        cfg = {}
+        cfg_path = os.path.join(get_data_dir(), "pet_config.json")
+        if not os.path.exists(cfg_path):
+            cfg_path = os.path.join(resource_dir(), "pet_config.json")
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+
+        raw = [(resolve_pet(str(cfg.get("pet", "cockroach"))),
+                str(cfg.get("skin", "default")), "primary")]
+        sp = cfg.get("second_pet") or {}
+        if isinstance(sp, dict) and sp.get("pet"):
+            raw.append((resolve_pet(str(sp["pet"])),
+                        str(sp.get("skin", "default")), "second"))
+        for extra in (cfg.get("extra_pets") or []):
+            if isinstance(extra, dict) and extra.get("pet"):
+                raw.append((resolve_pet(str(extra["pet"])),
+                            str(extra.get("skin", "default")), "extra"))
+
+        entries, seen = [], set()
+        for pet_id, skin, slot in raw:
+            if pet_id in seen:
+                continue          # 同一只宠物不重复同屏
+            seen.add(pet_id)
+            entries.append((pet_id, skin, slot))
+            if len(entries) >= MAX_PETS:
+                break
+        if not entries:
+            entries.append(("cockroach", "default", "primary"))
+        return entries
+
+    def spawn_pet(self, pet_id, skin, slot="extra", index=None, silent=False):
+        """新增一只宠物到屏幕（各自独立实例）"""
+        if len(self.pets) >= MAX_PETS:
+            if not silent:
+                self.show_bubble("最多同时养 %d 只哦" % MAX_PETS)
+            return None
+        if index is None:
+            index = len(self.pets)
+        self.max_spawn = max(self.max_spawn, index + 1)
+        pet = PetUnit(self, resolve_pet(pet_id), skin, slot=slot, index=index)
+        self.pets.append(pet)
+        self._refresh_hud()
+        if not silent:
+            pet.show_bubble("我来啦！")
+        return pet
+
+    def remove_pet(self, pet):
+        """让一只宠物离场（只移除它自己，其他宠物照常活动）"""
+        if pet not in self.pets:
+            return False
+        if len(self.pets) <= 1:
+            self.show_bubble("至少留一只陪你呀")
+            return False
+        pet.save()
+        pet.cancel_press()
+        pet.pet_widget.remove_me()
+        self.pets.remove(pet)
+        self._refresh_hud()
+        return True
+
+    def available_count(self):
+        """当前可选宠物总数（已解锁、可被选中上场的宠物）"""
+        try:
+            lib = load_pet_library()
+            unlocked = get_unlocked_pets()
+            return len([p for p in lib if p in unlocked])
+        except Exception:
+            return len(self.pets)
+
+    def onscreen_count(self):
+        """当前同屏、可独立点击操作的宠物数量"""
+        return len(self.pets)
+
+    def _save_config(self):
+        """把同屏宠物写回 pet_config.json（主宠 + 第二只 + 更多只）"""
+        try:
+            path = os.path.join(get_data_dir(), "pet_config.json")
+            cfg = {}
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                except Exception:
+                    cfg = {}
+            if self.pets:
+                cfg["pet"] = self.pets[0].pet_id
+                cfg["skin"] = self.pets[0].pet_skin
+            if len(self.pets) >= 2:
+                cfg["second_pet"] = {"pet": self.pets[1].pet_id,
+                                     "skin": self.pets[1].pet_skin}
+            else:
+                cfg.pop("second_pet", None)
+            extras = [{"pet": p.pet_id, "skin": p.pet_skin}
+                      for p in self.pets[2:]]
+            if extras:
+                cfg["extra_pets"] = extras
+            else:
+                cfg.pop("extra_pets", None)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # ============================================================
+    # 计数 HUD：可选宠物数量（实时）
+    # ============================================================
+    def _build_hud(self):
+        """左上角计数标签：可选宠物数量 + 同屏可点击数量"""
+        self.hud = Label(
+            text="",
+            size_hint=(None, None),
+            size=(dp(196), dp(46)),
+            font_size=dp(12),
+            bold=True,
+            halign="left",
+            valign="middle",
+            color=(1, 1, 1, 1) if (IS_ANDROID or self.viewport_mode)
+            else (0.12, 0.12, 0.14, 1),
+            padding=(dp(8), dp(4)),
+        )
+        with self.hud.canvas.before:
+            # 桌面端是色键透明遮罩，半透明背景会混出底色，所以用不透明
+            self._hud_bg_color = Color(0.10, 0.11, 0.16, 1)                 if (IS_ANDROID or self.viewport_mode) else Color(1, 1, 1, 1)
+            self._hud_bg = Rectangle(pos=(0, 0), size=(0, 0))
+        self.hud.bind(pos=self._sync_hud_bg, size=self._sync_hud_bg)
+        if self.viewport_mode:
+            self.hud.pos = (dp(10), self.screen_h - dp(58))
+        else:
+            self.hud.pos = (dp(4), dp(4))
+            self.hud.size = (dp(150), dp(34))
+        self.root.add_widget(self.hud)
+        self._refresh_hud()
+
+    def _sync_hud_bg(self, instance, value):
+        self._hud_bg.pos = instance.pos
+        self._hud_bg.size = instance.size
+
+    def _raise_hud(self):
+        """HUD 始终压在最上层"""
+        if self.hud is None:
+            return
+        try:
+            self.root.remove_widget(self.hud)
+            self.root.add_widget(self.hud)
+        except Exception:
+            pass
+
+    def _refresh_hud(self, dt=0):
+        """刷新「可选宠物数量」（宠物增减/解锁后立刻反映）
+
+        第一行就是"可选宠物数量"这个计数本身（当前可选/可上场的宠物总数），
+        第二行补充同屏可点的数量，方便一眼看出多宠是否都生效。
+        """
+        if self.hud is None:
+            return
+        self.hud.text = "可选宠物数量：%d\n同屏可点 %d 只（最多 %d 只）" % (
+            self.available_count(), self.onscreen_count(), MAX_PETS)
+
+    # ============================================================
+    # 触摸分发：点谁操作谁
+    # ============================================================
+    def _on_touch_down(self, widget, touch):
+        """把点击分发给命中的那只宠物（上层优先）"""
+        for pet in reversed(self.pets):
+            if pet.hit_test(widget, touch):
+                self._raise_pet(pet)          # 点中的宠物提到最上层
+                self._pressed_pet = pet
+                pet.begin_press()
+                return True
+        return False
+
+    def _on_touch_up(self, widget, touch):
+        """松手：交回给按下的那只宠物处理（多宠之间不串台）"""
+        pet = self._pressed_pet
+        self._pressed_pet = None
+        if pet is None:
+            for p in self.pets:
+                p.cancel_press()
+            return False
+        return pet.finish_press(widget, touch)
+
+    def _raise_pet(self, pet):
+        """把某只宠物提到最上层（不改动其他宠物的状态）"""
+        try:
+            pet.pet_widget.raise_me()
+        except Exception:
+            pass
+        self._raise_hud()
+
+    def _on_window_resize(self, instance, width, height):
+        """窗口尺寸变化：所有宠物一起重新夹取位置
+
+        桌面整屏遮罩下窗口尺寸就是屏幕尺寸；窗口刚创建时的中间态尺寸
+        （比如 160x160）不能拿来当屏幕用，小于 200 的一律忽略。
+        """
+        if width < 200 or height < 200:
+            return
+        if not IS_ANDROID and self.viewport_mode:
+            sw, sh = get_screen_size()
+            if sw > 200 and sh > 200:
+                # 桌面端始终以物理屏幕为准，防止高 DPI 的中途事件把尺寸带偏
+                width, height = sw, sh
+        self.screen_w, self.screen_h = float(width), float(height)
+        for pet in self.pets:
+            pet.set_screen_size(width, height)
+        if self.hud is not None and self.viewport_mode:
+            self.hud.pos = (dp(10), height - dp(58))
+            self._raise_hud()
+
+    # ============================================================
+    # 定时调度：统一驱动所有宠物
+    # ============================================================
+    def _tick_animation(self, dt):
+        for pet in list(self.pets):
+            pet._update_animation(dt)
+
+    def _tick_movement(self, dt):
+        for pet in list(self.pets):
+            pet._update_movement(dt)
+            pet._update_special(dt)
+
+    def _tick_hunger(self, dt):
+        for pet in list(self.pets):
+            pet._decay_hunger(dt)
+
+    def _tick_mood(self, dt):
+        for pet in list(self.pets):
+            pet._decay_mood(dt)
+
+    def _auto_save(self, dt):
+        for pet in list(self.pets):
+            pet.save()
+
+    # ============================================================
+    # 便捷代理：默认作用于"最近被按住的那只"
+    # ============================================================
+    def active_pet(self):
+        return self._pressed_pet or (self.pets[0] if self.pets else None)
+
+    def show_bubble(self, text, duration=BUBBLE_DURATION):
+        pet = self.active_pet()
+        if pet is not None:
+            pet.show_bubble(text, duration)
+
+    def _sync_window_size(self):
+        """（仅桌面小窗模式）让窗口尺寸跟上当前宠物"""
+        if self.viewport_mode:
+            return
+        pet = self.active_pet()
+        if pet is None:
+            return
+        Window.size = (pet.win_w, pet.win_h)
+        try:
+            self.root.size = (pet.win_w, pet.win_h)
+        except Exception:
+            pass
+
+    def show_stats_panel(self):
+        pet = self.active_pet()
+        if pet:
+            StatsPanel(pet).open()
+
+    def show_adventure(self):
+        pet = self.active_pet()
+        if pet:
+            AdventurePopup(pet).open()
+
+    def show_shop(self):
+        pet = self.active_pet()
+        if pet:
+            ShopPopup(pet).open()
+
+    def show_inventory(self):
+        pet = self.active_pet()
+        if pet:
+            InventoryPopup(pet).open()
+
+    def show_signin(self):
+        pet = self.active_pet()
+        if pet:
+            SigninPopup(pet).open()
+
+    def show_achievement(self):
+        pet = self.active_pet()
+        if pet:
+            AchievementPopup(pet).open()
+
+    def show_pet_select(self):
+        pet = self.active_pet()
+        if pet:
+            PetSelectPopup(pet).open()
+
     # ============================================================
     # 退出
     # ============================================================
     def quit_app(self):
-        """退出应用"""
-        self.pet_state.save(self.pet_id)
+        """退出应用：保存所有宠物的存档"""
+        self.save_all()
         self.stop()
 
+    def save_all(self):
+        for pet in list(self.pets):
+            pet.save()
+
     def on_stop(self):
-        """应用停止回调"""
-        if hasattr(self, 'pet_state') and hasattr(self, 'pet_id'):
-            try:
-                self.pet_state.save(self.pet_id)
-            except Exception:
-                pass
+        self.save_all()
         super().on_stop()
 
 
 def main():
     """程序入口"""
-    app = PetApp()
-    app.run()
+    PetApp().run()
 
 
 if __name__ == "__main__":
